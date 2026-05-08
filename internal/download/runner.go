@@ -18,11 +18,15 @@ import (
 	"example.com/downgo/internal/domain"
 )
 
-const progressTemplate = `{"percent":"%(progress._percent_str)s","speed":"%(progress.speed)s","eta":"%(progress.eta)s"}`
+const (
+	progressTemplate = `{"percent":"%(progress._percent_str)s","speed":"%(progress.speed)s","eta":"%(progress.eta)s"}`
+	metaPrefix       = "__DOWNGO_META__:"
+	finalMetaPrefix  = "__DOWNGO_FINAL__:"
+)
 
 type Runner interface {
 	Inspect(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error)
-	Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64)) error
+	Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error
 }
 
 type YTDLPRunner struct{}
@@ -31,12 +35,21 @@ type inspectJSON struct {
 	ID             string `json:"id"`
 	Title          string `json:"title"`
 	Thumbnail      string `json:"thumbnail"`
+	Resolution     string `json:"resolution"`
+	Height         int64  `json:"height"`
+	Ext            string `json:"ext"`
 	Duration       int64  `json:"duration"`
 	FilesizeApprox int64  `json:"filesize_approx"`
 }
 
 func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error) {
-	args := []string{"--dump-single-json", "--no-playlist", url}
+	args := []string{
+		"--dump-single-json",
+		"--no-playlist",
+		"-f", "bestvideo*+bestaudio/best",
+		"--merge-output-format", "mp4",
+		url,
+	}
 	cmd := exec.CommandContext(ctx, settings.YtDlpPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
@@ -65,24 +78,29 @@ func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url
 	if title == "" {
 		title = parsed.ID
 	}
+	qualityLabel := qualityLabelFromInspect(parsed.Height, parsed.Resolution)
 
 	return domain.InspectResult{
 		NormalizedURL:      fmt.Sprintf("https://www.youtube.com/watch?v=%s", parsed.ID),
 		VideoID:            parsed.ID,
 		Title:              title,
 		ThumbnailURL:       parsed.Thumbnail,
+		QualityLabel:       qualityLabel,
+		Container:          normalizeContainer(parsed.Ext),
 		DurationSeconds:    parsed.Duration,
 		EstimatedSizeBytes: parsed.FilesizeApprox,
 		SuggestedFilename:  safeOutputFilename(title, parsed.ID),
 	}, nil
 }
 
-func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64)) error {
+func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {
 	args := []string{
 		"--newline",
 		"--no-colors",
 		"--no-playlist",
 		"--progress-template", progressTemplate,
+		"--print", "before_dl:" + metaPrefix + "%(resolution)s|%(ext)s",
+		"--print", "after_move:" + finalMetaPrefix + "%(resolution)s|%(ext)s",
 		"-f", "bestvideo*+bestaudio/best",
 		"--merge-output-format", "mp4",
 		"--ffmpeg-location", filepath.Dir(settings.FfmpegPath),
@@ -125,8 +143,13 @@ func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, it
 		if line == "" {
 			continue
 		}
+		if strings.HasPrefix(line, metaPrefix) || strings.HasPrefix(line, finalMetaPrefix) {
+			qualityLabel, container := parseQualityMetadata(line)
+			onProgress(domain.StatusDownloading, 0, 0, 0, qualityLabel, container)
+			continue
+		}
 		if strings.Contains(line, "[Merger]") || strings.Contains(line, "[ffmpeg]") {
-			onProgress(domain.StatusPostprocessing, 100, 0, 0)
+			onProgress(domain.StatusPostprocessing, 100, 0, 0, "", "")
 			continue
 		}
 		var payload map[string]string
@@ -136,7 +159,7 @@ func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, it
 		percent := parsePercent(payload["percent"])
 		speed := parseFloat(payload["speed"])
 		eta := int64(parseFloat(payload["eta"]))
-		onProgress(domain.StatusDownloading, percent, speed, eta)
+		onProgress(domain.StatusDownloading, percent, speed, eta, "", "")
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -168,6 +191,45 @@ func safeOutputFilename(title, videoID string) string {
 		base = videoID
 	}
 	return fmt.Sprintf("%s [%s].mp4", sanitizeFilename(base), videoID)
+}
+
+func parseQualityMetadata(line string) (string, string) {
+	value := strings.TrimPrefix(strings.TrimPrefix(line, metaPrefix), finalMetaPrefix)
+	parts := strings.SplitN(value, "|", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return qualityLabelFromInspect(0, parts[0]), normalizeContainer(parts[1])
+}
+
+func qualityLabelFromInspect(height int64, resolution string) string {
+	if height > 0 {
+		return strconv.FormatInt(height, 10) + "p"
+	}
+
+	resolution = strings.TrimSpace(strings.ToLower(resolution))
+	if resolution == "" || resolution == "audio only" || resolution == "unknown" || resolution == "none" {
+		return ""
+	}
+	if strings.HasSuffix(resolution, "p") {
+		return strings.ToUpper(resolution)
+	}
+	if strings.Contains(resolution, "x") {
+		parts := strings.Split(resolution, "x")
+		last := strings.TrimSpace(parts[len(parts)-1])
+		if last != "" {
+			return last + "p"
+		}
+	}
+	return strings.ToUpper(resolution)
+}
+
+func normalizeContainer(ext string) string {
+	ext = strings.TrimSpace(strings.ToLower(ext))
+	if ext == "" || ext == "unknown" || ext == "none" {
+		return ""
+	}
+	return ext
 }
 
 func sanitizeFilename(input string) string {

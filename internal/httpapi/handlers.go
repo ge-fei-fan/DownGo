@@ -61,6 +61,7 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 		protected.Get("/api/downloads/events", api.handleEvents)
 		protected.Post("/api/downloads/{id}/cancel", api.handleCancel)
 		protected.Post("/api/downloads/{id}/retry", api.handleRetry)
+		protected.Post("/api/downloads/{id}/open-path", api.handleOpenPath)
 		protected.Delete("/api/downloads/{id}", api.handleDelete)
 		protected.Get("/api/downloads/{id}/file", api.handleFile)
 	})
@@ -255,6 +256,14 @@ func (api *API) handleRetry(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if err := api.manager.Delete(routeID(r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (api *API) handleOpenPath(w http.ResponseWriter, r *http.Request) {
+	if err := api.manager.OpenPath(routeID(r)); err != nil {
 		writeError(w, err)
 		return
 	}

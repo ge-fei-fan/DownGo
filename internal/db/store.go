@@ -38,6 +38,9 @@ func Open(baseDir string) (*Store, error) {
 	if _, err := conn.Exec(schema); err != nil {
 		return nil, err
 	}
+	if err := ensureDownloadColumns(conn); err != nil {
+		return nil, err
+	}
 
 	return &Store{db: conn}, nil
 }
@@ -98,11 +101,11 @@ func (s *Store) CreateDownload(item domain.DownloadItem) (domain.DownloadItem, e
 	now := time.Now().UTC()
 	res, err := s.db.Exec(`
 		INSERT INTO downloads(
-			source_url, normalized_url, platform, video_id, title, thumbnail_url,
+			source_url, normalized_url, platform, video_id, title, thumbnail_url, quality_label, container,
 			output_filename, output_path, status, progress_percent, speed_bps,
 			eta_seconds, error_message, process_pid, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, item.SourceURL, item.NormalizedURL, item.Platform, item.VideoID, item.Title, item.ThumbnailURL,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, item.SourceURL, item.NormalizedURL, item.Platform, item.VideoID, item.Title, item.ThumbnailURL, item.QualityLabel, item.Container,
 		item.OutputFilename, item.OutputPath, item.Status, item.ProgressPercent, item.SpeedBPS,
 		item.ETASeconds, item.ErrorMessage, item.ProcessPID, now, now)
 	if err != nil {
@@ -142,15 +145,16 @@ func (s *Store) FindByVideoID(videoID string) ([]domain.DownloadItem, error) {
 	return scanDownloads(rows)
 }
 
-func (s *Store) UpdateProgress(id int64, status string, percent float64, speed float64, eta int64, pid int, errMsg string, startedAt *time.Time, completedAt *time.Time) (domain.DownloadItem, error) {
+func (s *Store) UpdateProgress(id int64, status string, percent float64, speed float64, eta int64, pid int, errMsg string, qualityLabel string, container string, startedAt *time.Time, completedAt *time.Time) (domain.DownloadItem, error) {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`
 		UPDATE downloads
 		SET status = ?, progress_percent = ?, speed_bps = ?, eta_seconds = ?,
 			process_pid = ?, error_message = ?, started_at = COALESCE(started_at, ?),
-			completed_at = ?, updated_at = ?
+			completed_at = ?, quality_label = COALESCE(NULLIF(?, ''), quality_label),
+			container = COALESCE(NULLIF(?, ''), container), updated_at = ?
 		WHERE id = ? AND deleted_at IS NULL
-	`, status, percent, speed, eta, pid, errMsg, startedAt, completedAt, now, id)
+	`, status, percent, speed, eta, pid, errMsg, startedAt, completedAt, qualityLabel, container, now, id)
 	if err != nil {
 		return domain.DownloadItem{}, err
 	}
@@ -250,7 +254,7 @@ func (s *Store) MarkMissingCompletedAsFailed() ([]domain.DownloadItem, error) {
 		if util.FileExists(item.OutputPath) {
 			continue
 		}
-		next, err := s.UpdateProgress(item.ID, domain.StatusFailed, 0, 0, 0, 0, "文件丢失", item.StartedAt, nil)
+		next, err := s.UpdateProgress(item.ID, domain.StatusFailed, 0, 0, 0, 0, "文件丢失", item.QualityLabel, item.Container, item.StartedAt, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -265,7 +269,7 @@ var (
 )
 
 const downloadSelectColumns = `
-id, source_url, normalized_url, platform, video_id, title, thumbnail_url,
+id, source_url, normalized_url, platform, video_id, title, thumbnail_url, quality_label, container,
 output_filename, output_path, status, progress_percent, speed_bps, eta_seconds,
 error_message, process_pid, created_at, started_at, completed_at, updated_at, deleted_at
 `
@@ -296,7 +300,7 @@ func scanDownload(row scanner) (domain.DownloadItem, error) {
 	var deletedAt sql.NullTime
 	if err := row.Scan(
 		&item.ID, &item.SourceURL, &item.NormalizedURL, &item.Platform, &item.VideoID, &item.Title,
-		&item.ThumbnailURL, &item.OutputFilename, &item.OutputPath, &item.Status, &item.ProgressPercent,
+		&item.ThumbnailURL, &item.QualityLabel, &item.Container, &item.OutputFilename, &item.OutputPath, &item.Status, &item.ProgressPercent,
 		&item.SpeedBPS, &item.ETASeconds, &item.ErrorMessage, &item.ProcessPID, &item.CreatedAt,
 		&startedAt, &completedAt, &item.UpdatedAt, &deletedAt,
 	); err != nil {
@@ -312,4 +316,21 @@ func scanDownload(row scanner) (domain.DownloadItem, error) {
 		item.DeletedAt = &deletedAt.Time
 	}
 	return item, nil
+}
+
+func ensureDownloadColumns(conn *sql.DB) error {
+	statements := []string{
+		`ALTER TABLE downloads ADD COLUMN quality_label TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE downloads ADD COLUMN container TEXT NOT NULL DEFAULT ''`,
+	}
+
+	for _, statement := range statements {
+		if _, err := conn.Exec(statement); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }

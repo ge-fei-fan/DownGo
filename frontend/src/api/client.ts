@@ -6,6 +6,8 @@ export type DownloadItem = {
   videoId: string
   title: string
   thumbnailUrl: string
+  qualityLabel: string
+  container: string
   outputFilename: string
   outputPath: string
   status: string
@@ -25,6 +27,8 @@ export type InspectResult = {
   videoId: string
   title: string
   thumbnailUrl: string
+  qualityLabel: string
+  container: string
   durationSeconds: number
   estimatedSizeBytes: number
   suggestedFilename: string
@@ -154,6 +158,10 @@ export async function retryDownload(id: number) {
 
 export async function deleteDownload(id: number) {
   return request<void>(`/api/downloads/${id}`, { method: 'DELETE' })
+}
+
+export async function openDownloadPath(id: number) {
+  return request<void>(`/api/downloads/${id}/open-path`, { method: 'POST' })
 }
 
 export function downloadFileURL(id: number) {

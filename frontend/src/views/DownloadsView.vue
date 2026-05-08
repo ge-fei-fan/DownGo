@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { DeleteOutlined, DownloadOutlined, RedoOutlined, StopOutlined } from '@ant-design/icons-vue'
+import { DeleteOutlined, FolderOpenOutlined, RedoOutlined, StopOutlined } from '@ant-design/icons-vue'
 
 import {
   cancelDownload,
   createDownload,
   deleteDownload,
-  downloadFileURL,
   inspectDownload,
+  openDownloadPath,
   retryDownload,
   type DownloadItem,
   type InspectResult,
@@ -25,20 +25,22 @@ const inspect = ref<InspectResult | null>(null)
 
 const activeColumns = [
   { title: '视频', key: 'video' },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 140 },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
+  { title: '清晰度', key: 'quality', width: 120 },
   { title: '进度', key: 'progress', width: 220 },
   { title: '速度', key: 'speed', width: 140 },
-  { title: '剩余时间', key: 'eta', width: 100 },
+  { title: '剩余时间', key: 'eta', width: 110 },
   { title: '创建时间', dataIndex: 'createdAt', key: 'createdAt', width: 180 },
-  { title: '操作', key: 'action', width: 200 },
+  { title: '操作', key: 'action', width: 180 },
 ]
 
 const completedColumns = [
   { title: '视频', key: 'video' },
+  { title: '清晰度', key: 'quality', width: 120 },
   { title: '保存文件', dataIndex: 'outputFilename', key: 'outputFilename' },
   { title: '文件路径', dataIndex: 'outputPath', key: 'outputPath' },
   { title: '完成时间', dataIndex: 'completedAt', key: 'completedAt', width: 180 },
-  { title: '操作', key: 'action', width: 220 },
+  { title: '操作', key: 'action', width: 160 },
 ]
 
 const activeList = computed(() => downloads.activeList)
@@ -93,7 +95,7 @@ async function submitDownload() {
 async function confirmDelete(item: DownloadItem) {
   Modal.confirm({
     title: '删除记录和文件？',
-    content: '数据库记录会被软删除，关联的文件也会从磁盘中移除。',
+    content: '数据库记录会被软删除，关联文件也会从磁盘中移除。',
     okText: '确认删除',
     okType: 'danger',
     async onOk() {
@@ -111,6 +113,14 @@ async function stopTask(item: DownloadItem) {
 async function retryTask(item: DownloadItem) {
   await retryDownload(item.id)
   message.success('任务已重新加入队列')
+}
+
+async function openPath(item: DownloadItem) {
+  try {
+    await openDownloadPath(item.id)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '打开文件路径失败')
+  }
 }
 
 function formatSpeed(value: number) {
@@ -160,9 +170,29 @@ function formatStatus(status: string) {
   }
 }
 
+function formatQuality(item: Pick<DownloadItem, 'qualityLabel' | 'container'>) {
+  const quality = item.qualityLabel?.trim()
+  const container = item.container?.trim()
+  if (quality && container) {
+    return `${quality} / ${container}`
+  }
+  if (quality) {
+    return quality
+  }
+  if (container) {
+    return container
+  }
+  return '-'
+}
+
 onMounted(() => {
   downloads.loadActive()
   downloads.loadCompleted()
+  downloads.connect()
+})
+
+onBeforeUnmount(() => {
+  downloads.disconnect()
 })
 </script>
 
@@ -171,7 +201,7 @@ onMounted(() => {
     <section class="hero">
       <div>
         <div class="hero-kicker">YouTube / Shorts</div>
-        <h1>添加下载任务，并实时查看进度。</h1>
+        <h1>添加下载任务，并实时查看当前进度与清晰度。</h1>
       </div>
       <a-card class="queue-card" :bordered="false">
         <a-space direction="vertical" style="width: 100%" size="middle">
@@ -195,6 +225,7 @@ onMounted(() => {
                 <div class="inspect-title">{{ inspect.title }}</div>
                 <div>视频 ID：{{ inspect.videoId }}</div>
                 <div>预计大小：{{ (inspect.estimatedSizeBytes / 1024 / 1024).toFixed(2) }} MiB</div>
+                <div>预计清晰度：{{ formatQuality(inspect) }}</div>
                 <div>建议文件名：{{ inspect.suggestedFilename }}</div>
               </div>
             </a-space>
@@ -224,11 +255,17 @@ onMounted(() => {
                   </div>
                 </div>
               </template>
-              <template v-else-if="column.key === 'progress'">
-                <a-progress :percent="Math.round(record.progressPercent)" :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined" />
-              </template>
               <template v-else-if="column.key === 'status'">
                 {{ formatStatus(record.status) }}
+              </template>
+              <template v-else-if="column.key === 'quality'">
+                <a-tag color="blue">{{ formatQuality(record) }}</a-tag>
+              </template>
+              <template v-else-if="column.key === 'progress'">
+                <a-progress
+                  :percent="Math.round(record.progressPercent)"
+                  :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined"
+                />
               </template>
               <template v-else-if="column.key === 'speed'">
                 {{ formatSpeed(record.speedBps) }}
@@ -272,8 +309,12 @@ onMounted(() => {
                   <div class="mobile-status">{{ formatStatus(record.status) }}</div>
                 </div>
               </div>
-              <a-progress :percent="Math.round(record.progressPercent)" :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined" />
+              <a-progress
+                :percent="Math.round(record.progressPercent)"
+                :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined"
+              />
               <div class="mobile-meta">
+                <span>清晰度：{{ formatQuality(record) }}</span>
                 <span>速度：{{ formatSpeed(record.speedBps) }}</span>
                 <span>剩余：{{ formatETA(record.etaSeconds) }}</span>
                 <span>创建：{{ formatDate(record.createdAt) }}</span>
@@ -322,19 +363,17 @@ onMounted(() => {
                   <div class="video-title">{{ record.title }}</div>
                 </div>
               </template>
+              <template v-else-if="column.key === 'quality'">
+                <a-tag color="blue">{{ formatQuality(record) }}</a-tag>
+              </template>
               <template v-else-if="column.key === 'completedAt'">
                 {{ formatDate(record.completedAt) }}
               </template>
               <template v-else-if="column.key === 'action'">
                 <a-space>
-                  <a-tooltip title="下载文件">
-                    <a-button size="small" :href="downloadFileURL(record.id)" target="_blank">
-                      <template #icon><DownloadOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
-                  <a-tooltip title="重新下载">
-                    <a-button size="small" @click="retryTask(record)">
-                      <template #icon><RedoOutlined /></template>
+                  <a-tooltip title="打开文件路径">
+                    <a-button size="small" @click="openPath(record)">
+                      <template #icon><FolderOpenOutlined /></template>
                     </a-button>
                   </a-tooltip>
                   <a-tooltip title="删除记录和文件">
@@ -358,17 +397,14 @@ onMounted(() => {
                 </div>
               </div>
               <div class="mobile-meta">
+                <span>清晰度：{{ formatQuality(record) }}</span>
                 <span>文件：{{ record.outputFilename }}</span>
                 <span>路径：{{ record.outputPath }}</span>
               </div>
               <a-space wrap>
-                <a-button size="small" :href="downloadFileURL(record.id)" target="_blank">
-                  <template #icon><DownloadOutlined /></template>
-                  下载文件
-                </a-button>
-                <a-button size="small" @click="retryTask(record)">
-                  <template #icon><RedoOutlined /></template>
-                  重试
+                <a-button size="small" @click="openPath(record)">
+                  <template #icon><FolderOpenOutlined /></template>
+                  打开文件路径
                 </a-button>
                 <a-button danger size="small" @click="confirmDelete(record)">
                   <template #icon><DeleteOutlined /></template>

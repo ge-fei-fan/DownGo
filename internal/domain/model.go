@@ -21,6 +21,8 @@ type DownloadItem struct {
 	VideoID         string     `json:"videoId"`
 	Title           string     `json:"title"`
 	ThumbnailURL    string     `json:"thumbnailUrl"`
+	QualityLabel    string     `json:"qualityLabel"`
+	Container       string     `json:"container"`
 	OutputFilename  string     `json:"outputFilename"`
 	OutputPath      string     `json:"outputPath"`
 	Status          string     `json:"status"`
@@ -41,6 +43,8 @@ type InspectResult struct {
 	VideoID            string        `json:"videoId"`
 	Title              string        `json:"title"`
 	ThumbnailURL       string        `json:"thumbnailUrl"`
+	QualityLabel       string        `json:"qualityLabel"`
+	Container          string        `json:"container"`
 	DurationSeconds    int64         `json:"durationSeconds"`
 	EstimatedSizeBytes int64         `json:"estimatedSizeBytes"`
 	SuggestedFilename  string        `json:"suggestedFilename"`

@@ -100,6 +100,8 @@ func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, 
 		VideoID:         meta.VideoID,
 		Title:           meta.Title,
 		ThumbnailURL:    meta.ThumbnailURL,
+		QualityLabel:    meta.QualityLabel,
+		Container:       meta.Container,
 		OutputFilename:  meta.SuggestedFilename,
 		OutputPath:      filepath.Join(settings.DownloadDir, meta.SuggestedFilename),
 		Status:          domain.StatusQueued,
@@ -136,7 +138,7 @@ func (m *Manager) Retry(id int64) (domain.DownloadItem, error) {
 		return domain.DownloadItem{}, errors.New("只有失败或已取消的任务才能重试")
 	}
 
-	updated, err := m.store.UpdateProgress(id, domain.StatusQueued, 0, 0, 0, 0, "", nil, nil)
+	updated, err := m.store.UpdateProgress(id, domain.StatusQueued, 0, 0, 0, 0, "", item.QualityLabel, item.Container, nil, nil)
 	if err != nil {
 		return domain.DownloadItem{}, err
 	}
@@ -163,7 +165,7 @@ func (m *Manager) Cancel(id int64) (domain.DownloadItem, error) {
 	}
 
 	now := time.Now().UTC()
-	updated, err := m.store.UpdateProgress(id, domain.StatusCanceled, item.ProgressPercent, 0, 0, 0, "用户已取消", item.StartedAt, &now)
+	updated, err := m.store.UpdateProgress(id, domain.StatusCanceled, item.ProgressPercent, 0, 0, 0, "用户已取消", item.QualityLabel, item.Container, item.StartedAt, &now)
 	if err != nil {
 		return domain.DownloadItem{}, err
 	}
@@ -201,6 +203,20 @@ func (m *Manager) List(view string, page int, pageSize int) (domain.PagedDownloa
 
 func (m *Manager) Get(id int64) (domain.DownloadItem, error) {
 	return m.store.GetDownload(id)
+}
+
+func (m *Manager) OpenPath(id int64) error {
+	item, err := m.store.GetDownload(id)
+	if err != nil {
+		return err
+	}
+	if item.Status != domain.StatusCompleted {
+		return errors.New("只有已完成任务才能打开文件路径")
+	}
+	if !util.FileExists(item.OutputPath) {
+		return errors.New("文件不存在，无法打开文件路径")
+	}
+	return util.OpenFolderAndSelectFile(item.OutputPath)
 }
 
 func (m *Manager) Subscribe() (<-chan domain.DownloadEvent, func()) {
@@ -258,7 +274,9 @@ func (m *Manager) runJob(ctx context.Context, id int64) {
 
 	settings := m.settings.Current()
 	startedAt := time.Now().UTC()
-	_, _ = m.store.UpdateProgress(id, domain.StatusDownloading, 0, 0, 0, 0, "", &startedAt, nil)
+	currentQualityLabel := item.QualityLabel
+	currentContainer := item.Container
+	_, _ = m.store.UpdateProgress(id, domain.StatusDownloading, 0, 0, 0, 0, "", currentQualityLabel, currentContainer, &startedAt, nil)
 
 	onStart := func(pid int) {
 		m.mu.Lock()
@@ -266,14 +284,24 @@ func (m *Manager) runJob(ctx context.Context, id int64) {
 			job.pid = pid
 		}
 		m.mu.Unlock()
-		updated, err := m.store.UpdateProgress(id, domain.StatusDownloading, 0, 0, 0, pid, "", &startedAt, nil)
+		updated, err := m.store.UpdateProgress(id, domain.StatusDownloading, 0, 0, 0, pid, "", currentQualityLabel, currentContainer, &startedAt, nil)
 		if err == nil {
+			currentQualityLabel = updated.QualityLabel
+			currentContainer = updated.Container
 			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		}
 	}
-	onProgress := func(status string, percent float64, speed float64, eta int64) {
-		updated, err := m.store.UpdateProgress(id, status, percent, speed, eta, m.activePID(id), "", &startedAt, nil)
+	onProgress := func(status string, percent float64, speed float64, eta int64, qualityLabel string, container string) {
+		if qualityLabel != "" {
+			currentQualityLabel = qualityLabel
+		}
+		if container != "" {
+			currentContainer = container
+		}
+		updated, err := m.store.UpdateProgress(id, status, percent, speed, eta, m.activePID(id), "", currentQualityLabel, currentContainer, &startedAt, nil)
 		if err == nil {
+			currentQualityLabel = updated.QualityLabel
+			currentContainer = updated.Container
 			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		}
 	}
@@ -282,17 +310,17 @@ func (m *Manager) runJob(ctx context.Context, id int64) {
 	completedAt := time.Now().UTC()
 	switch {
 	case err == nil:
-		updated, updateErr := m.store.UpdateProgress(id, domain.StatusCompleted, 100, 0, 0, 0, "", &startedAt, &completedAt)
+		updated, updateErr := m.store.UpdateProgress(id, domain.StatusCompleted, 100, 0, 0, 0, "", currentQualityLabel, currentContainer, &startedAt, &completedAt)
 		if updateErr == nil {
 			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		}
 	case errors.Is(err, context.Canceled):
-		updated, updateErr := m.store.UpdateProgress(id, domain.StatusCanceled, item.ProgressPercent, 0, 0, 0, "用户已取消", &startedAt, &completedAt)
+		updated, updateErr := m.store.UpdateProgress(id, domain.StatusCanceled, item.ProgressPercent, 0, 0, 0, "用户已取消", currentQualityLabel, currentContainer, &startedAt, &completedAt)
 		if updateErr == nil {
 			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		}
 	default:
-		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, item.ProgressPercent, 0, 0, 0, err.Error(), &startedAt, &completedAt)
+		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, item.ProgressPercent, 0, 0, 0, err.Error(), currentQualityLabel, currentContainer, &startedAt, &completedAt)
 		if updateErr == nil {
 			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		}
@@ -342,7 +370,7 @@ func (m *Manager) findBlockingDuplicate(videoID string) (*domain.DownloadItem, e
 			if util.FileExists(item.OutputPath) {
 				return &item, nil
 			}
-			if _, err := m.store.UpdateProgress(item.ID, domain.StatusFailed, 0, 0, 0, 0, "文件丢失", item.StartedAt, nil); err != nil {
+			if _, err := m.store.UpdateProgress(item.ID, domain.StatusFailed, 0, 0, 0, 0, "文件丢失", item.QualityLabel, item.Container, item.StartedAt, nil); err != nil {
 				return nil, err
 			}
 		}

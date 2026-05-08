@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS downloads (
   video_id TEXT NOT NULL,
   title TEXT NOT NULL,
   thumbnail_url TEXT NOT NULL DEFAULT '',
+  quality_label TEXT NOT NULL DEFAULT '',
+  container TEXT NOT NULL DEFAULT '',
   output_filename TEXT NOT NULL,
   output_path TEXT NOT NULL,
   status TEXT NOT NULL,

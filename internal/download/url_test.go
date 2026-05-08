@@ -19,7 +19,7 @@ func (s *stubRunner) Inspect(ctx context.Context, settings config.Settings, url 
 	return domain.InspectResult{}, nil
 }
 
-func (s *stubRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64)) error {
+func (s *stubRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {
 	s.downloadCalls++
 	return nil
 }
