@@ -5,6 +5,7 @@ import "time"
 const (
 	PlatformYouTube = "youtube"
 
+	StatusResolving      = "resolving"
 	StatusQueued         = "queued"
 	StatusDownloading    = "downloading"
 	StatusPostprocessing = "postprocessing"

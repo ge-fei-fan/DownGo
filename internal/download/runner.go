@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,9 +21,13 @@ import (
 )
 
 const (
-	progressTemplate = `{"percent":"%(progress._percent_str)s","speed":"%(progress.speed)s","eta":"%(progress.eta)s"}`
-	metaPrefix       = "__DOWNGO_META__:"
-	finalMetaPrefix  = "__DOWNGO_FINAL__:"
+	progressPrefix       = "__DOWNGO_PROGRESS__:"
+	postprocessPrefix    = "__DOWNGO_POST__:"
+	progressTemplate     = progressPrefix + `{"percent":"%(progress._percent_str)s","speed":"%(progress.speed)s","eta":"%(progress.eta)s"}`
+	postprocessTemplate  = postprocessPrefix + `{"status":"%(progress.status)s","eta":"%(progress.eta)s"}`
+	metaPrefix           = "__DOWNGO_META__:"
+	finalMetaPrefix      = "__DOWNGO_FINAL__:"
+	progressDeltaSeconds = "1"
 )
 
 type Runner interface {
@@ -40,6 +46,11 @@ type inspectJSON struct {
 	Ext            string `json:"ext"`
 	Duration       int64  `json:"duration"`
 	FilesizeApprox int64  `json:"filesize_approx"`
+}
+
+type streamLine struct {
+	stream string
+	text   string
 }
 
 func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error) {
@@ -94,19 +105,7 @@ func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url
 }
 
 func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {
-	args := []string{
-		"--newline",
-		"--no-colors",
-		"--no-playlist",
-		"--progress-template", progressTemplate,
-		"--print", "before_dl:" + metaPrefix + "%(resolution)s|%(ext)s",
-		"--print", "after_move:" + finalMetaPrefix + "%(resolution)s|%(ext)s",
-		"-f", "bestvideo*+bestaudio/best",
-		"--merge-output-format", "mp4",
-		"--ffmpeg-location", filepath.Dir(settings.FfmpegPath),
-		"-o", item.OutputPath,
-		item.NormalizedURL,
-	}
+	args := buildDownloadArgs(settings, item)
 
 	cmd := exec.CommandContext(ctx, settings.YtDlpPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -120,56 +119,37 @@ func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, it
 		return err
 	}
 
-	var stderrBuf bytes.Buffer
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	onStart(cmd.Process.Pid)
 
-	doneErr := make(chan error, 1)
+	lineCh := make(chan streamLine, 64)
+	scanErrCh := make(chan error, 2)
+	var scanWG sync.WaitGroup
+	scanWG.Add(2)
+
+	go scanOutput("stdout", stdout, lineCh, scanErrCh, &scanWG)
+	go scanOutput("stderr", stderr, lineCh, scanErrCh, &scanWG)
 	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			stderrBuf.WriteString(line)
-			stderrBuf.WriteByte('\n')
-		}
-		doneErr <- scanner.Err()
+		scanWG.Wait()
+		close(lineCh)
 	}()
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, metaPrefix) || strings.HasPrefix(line, finalMetaPrefix) {
-			qualityLabel, container := parseQualityMetadata(line)
-			onProgress(domain.StatusDownloading, 0, 0, 0, qualityLabel, container)
-			continue
-		}
-		if strings.Contains(line, "[Merger]") || strings.Contains(line, "[ffmpeg]") {
-			onProgress(domain.StatusPostprocessing, 100, 0, 0, "", "")
-			continue
-		}
-		var payload map[string]string
-		if err := json.Unmarshal([]byte(line), &payload); err != nil {
-			continue
-		}
-		percent := parsePercent(payload["percent"])
-		speed := parseFloat(payload["speed"])
-		eta := int64(parseFloat(payload["eta"]))
-		onProgress(domain.StatusDownloading, percent, speed, eta, "", "")
-	}
-
-	if err := scanner.Err(); err != nil {
-		return err
+	var stderrBuf bytes.Buffer
+	for line := range lineCh {
+		handleDownloadOutputLine(line, &stderrBuf, onProgress)
 	}
 
 	waitErr := cmd.Wait()
-	streamErr := <-doneErr
-	if streamErr != nil {
-		return streamErr
+	var scanErr error
+	for i := 0; i < 2; i++ {
+		if err := <-scanErrCh; err != nil && scanErr == nil {
+			scanErr = err
+		}
+	}
+	if scanErr != nil {
+		return scanErr
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderrBuf.String())
@@ -183,6 +163,82 @@ func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, it
 	}
 
 	return nil
+}
+
+func buildDownloadArgs(settings config.Settings, item domain.DownloadItem) []string {
+	return []string{
+		"--newline",
+		"--progress",
+		"--progress-delta", progressDeltaSeconds,
+		"--no-colors",
+		"--no-playlist",
+		"--progress-template", "download:" + progressTemplate,
+		"--progress-template", "postprocess:" + postprocessTemplate,
+		"--print", "before_dl:" + metaPrefix + "%(resolution)s|%(ext)s",
+		"--print", "after_move:" + finalMetaPrefix + "%(resolution)s|%(ext)s",
+		"-f", "bestvideo*+bestaudio/best",
+		"--merge-output-format", "mp4",
+		"--ffmpeg-location", filepath.Dir(settings.FfmpegPath),
+		"-o", item.OutputPath,
+		item.NormalizedURL,
+	}
+}
+
+func scanOutput(stream string, pipe io.ReadCloser, lineCh chan<- streamLine, errCh chan<- error, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	scanner := bufio.NewScanner(pipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		lineCh <- streamLine{stream: stream, text: scanner.Text()}
+	}
+	errCh <- scanner.Err()
+}
+
+func handleDownloadOutputLine(line streamLine, stderrBuf *bytes.Buffer, onProgress func(string, float64, float64, int64, string, string)) {
+	text := strings.TrimSpace(line.text)
+	if text == "" {
+		return
+	}
+	if strings.HasPrefix(text, metaPrefix) || strings.HasPrefix(text, finalMetaPrefix) {
+		qualityLabel, container := parseQualityMetadata(text)
+		onProgress(domain.StatusDownloading, 0, 0, 0, qualityLabel, container)
+		return
+	}
+	if strings.Contains(text, "[Merger]") || strings.Contains(text, "[ffmpeg]") {
+		onProgress(domain.StatusPostprocessing, 100, 0, 0, "", "")
+		return
+	}
+
+	if strings.HasPrefix(text, progressPrefix) {
+		percent, speed, eta, ok := parseProgressPayload(strings.TrimPrefix(text, progressPrefix))
+		if ok {
+			onProgress(domain.StatusDownloading, percent, speed, eta, "", "")
+			return
+		}
+	}
+
+	if strings.HasPrefix(text, postprocessPrefix) {
+		onProgress(domain.StatusPostprocessing, 100, 0, 0, "", "")
+		return
+	}
+
+	if line.stream == "stderr" {
+		stderrBuf.WriteString(text)
+		stderrBuf.WriteByte('\n')
+	}
+}
+
+func parseProgressPayload(value string) (float64, float64, int64, bool) {
+	var payload struct {
+		Percent string `json:"percent"`
+		Speed   string `json:"speed"`
+		ETA     string `json:"eta"`
+	}
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return 0, 0, 0, false
+	}
+	return parsePercent(payload.Percent), parseFloat(payload.Speed), int64(parseFloat(payload.ETA)), true
 }
 
 func safeOutputFilename(title, videoID string) string {

@@ -41,6 +41,9 @@ func Open(baseDir string) (*Store, error) {
 	if err := ensureDownloadColumns(conn); err != nil {
 		return nil, err
 	}
+	if err := ensureDownloadIndexes(conn); err != nil {
+		return nil, err
+	}
 
 	return &Store{db: conn}, nil
 }
@@ -161,6 +164,26 @@ func (s *Store) UpdateProgress(id int64, status string, percent float64, speed f
 	return s.GetDownload(id)
 }
 
+func (s *Store) UpdateMetadata(id int64, item domain.DownloadItem, status string, errMsg string) (domain.DownloadItem, error) {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+		UPDATE downloads
+		SET normalized_url = ?, platform = ?, video_id = ?, title = ?, thumbnail_url = ?,
+			quality_label = ?, container = ?, output_filename = ?, output_path = ?,
+			status = ?, error_message = ?, updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, item.NormalizedURL, item.Platform, item.VideoID, item.Title, item.ThumbnailURL,
+		item.QualityLabel, item.Container, item.OutputFilename, item.OutputPath,
+		status, errMsg, now, id)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return domain.DownloadItem{}, ErrDuplicate
+		}
+		return domain.DownloadItem{}, err
+	}
+	return s.GetDownload(id)
+}
+
 func (s *Store) MarkDeleted(id int64) error {
 	now := time.Now().UTC()
 	res, err := s.db.Exec(`
@@ -192,7 +215,7 @@ func (s *Store) ListDownloads(view string, page int, pageSize int) (domain.Paged
 
 	where := `deleted_at IS NULL AND status = 'completed'`
 	if view == "active" {
-		where = `deleted_at IS NULL AND status <> 'completed'`
+		where = `deleted_at IS NULL AND status IN ('resolving', 'queued', 'downloading', 'postprocessing', 'failed')`
 	}
 
 	countRow := s.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM downloads WHERE %s`, where))
@@ -229,8 +252,8 @@ func (s *Store) MarkStaleActiveAsFailed() error {
 	_, err := s.db.Exec(`
 		UPDATE downloads
 		SET status = ?, error_message = ?, process_pid = 0, updated_at = CURRENT_TIMESTAMP
-		WHERE deleted_at IS NULL AND status IN (?, ?, ?)
-	`, domain.StatusFailed, "服务重启导致任务中断", domain.StatusQueued, domain.StatusDownloading, domain.StatusPostprocessing)
+		WHERE deleted_at IS NULL AND status IN (?, ?, ?, ?)
+	`, domain.StatusFailed, "服务重启导致任务中断", domain.StatusResolving, domain.StatusQueued, domain.StatusDownloading, domain.StatusPostprocessing)
 	return err
 }
 
@@ -282,7 +305,7 @@ type scanner interface {
 }
 
 func scanDownloads(rows *sql.Rows) ([]domain.DownloadItem, error) {
-	var items []domain.DownloadItem
+	items := make([]domain.DownloadItem, 0)
 	for rows.Next() {
 		item, err := scanDownload(rows)
 		if err != nil {
@@ -333,4 +356,18 @@ func ensureDownloadColumns(conn *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func ensureDownloadIndexes(conn *sql.DB) error {
+	if _, err := conn.Exec(`DROP INDEX IF EXISTS ux_downloads_video_active`); err != nil {
+		return err
+	}
+	_, err := conn.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS ux_downloads_video_active
+		ON downloads(platform, video_id)
+		WHERE deleted_at IS NULL
+		  AND video_id <> ''
+		  AND status IN ('resolving', 'queued', 'downloading', 'postprocessing', 'completed')
+	`)
+	return err
 }

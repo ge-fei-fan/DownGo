@@ -1,27 +1,22 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { DeleteOutlined, FolderOpenOutlined, RedoOutlined, StopOutlined } from '@ant-design/icons-vue'
+import { DeleteOutlined, FolderOpenOutlined, RedoOutlined } from '@ant-design/icons-vue'
 
 import {
-  cancelDownload,
   createDownload,
   deleteDownload,
-  inspectDownload,
   openDownloadPath,
   retryDownload,
   type DownloadItem,
-  type InspectResult,
 } from '@/api/client'
 import { useDownloadsStore } from '@/stores/downloads'
 
 const downloads = useDownloadsStore()
 
-const loadingInspect = ref(false)
 const loadingCreate = ref(false)
 const activeTab = ref<'active' | 'completed'>('active')
 const form = reactive({ url: '' })
-const inspect = ref<InspectResult | null>(null)
 
 const activeColumns = [
   { title: '视频', key: 'video' },
@@ -31,7 +26,7 @@ const activeColumns = [
   { title: '速度', key: 'speed', width: 140 },
   { title: '剩余时间', key: 'eta', width: 110 },
   { title: '创建时间', dataIndex: 'createdAt', key: 'createdAt', width: 180 },
-  { title: '操作', key: 'action', width: 180 },
+  { title: '操作', key: 'action', width: 140 },
 ]
 
 const completedColumns = [
@@ -45,69 +40,49 @@ const completedColumns = [
 
 const activeList = computed(() => downloads.activeList)
 const completedList = computed(() => downloads.completedList)
+const connectionState = computed(() => downloads.connectionState)
+const connectionMessage = computed(() => downloads.connectionMessage)
 
-const duplicateText = computed(() => {
-  if (!inspect.value?.duplicateOf) {
-    return ''
-  }
-  return `该视频已存在任务：${inspect.value.duplicateOf.title}`
-})
-
-async function parseURL() {
+async function submitDownload() {
   if (!form.url.trim()) {
     message.warning('请先粘贴 YouTube 视频或 Shorts 链接')
     return
   }
-  loadingInspect.value = true
-  try {
-    inspect.value = await inspectDownload(form.url.trim())
-  } catch (error) {
-    inspect.value = null
-    message.error(error instanceof Error ? error.message : '解析链接失败')
-  } finally {
-    loadingInspect.value = false
-  }
-}
 
-async function submitDownload() {
-  if (!form.url.trim()) {
-    return
-  }
   loadingCreate.value = true
   try {
-    await createDownload(form.url.trim())
-    message.success('下载任务已加入队列')
+    const item = await createDownload(form.url.trim())
+    downloads.upsertLocal(item)
+    activeTab.value = 'active'
     form.url = ''
-    inspect.value = null
+    message.success('下载任务已加入队列')
   } catch (error) {
-    const err = error as Error & { code?: string; item?: DownloadItem }
-    if (err.code === 'DOWNLOAD_ALREADY_EXISTS' && err.item) {
-      message.warning(`已存在任务：${err.item.title}`)
-      inspect.value = { ...(inspect.value as InspectResult), duplicateOf: err.item }
-    } else {
-      message.error(err.message)
-    }
+    message.error(error instanceof Error ? error.message : '创建下载任务失败')
   } finally {
     loadingCreate.value = false
   }
 }
 
 async function confirmDelete(item: DownloadItem) {
+  const activeRecord = isRecordActive(item)
   Modal.confirm({
-    title: '删除记录和文件？',
-    content: '数据库记录会被软删除，关联文件也会从磁盘中移除。',
+    title: activeRecord ? '删除任务并中断下载？' : '删除记录和文件？',
+    content: activeRecord
+      ? '删除后会立即中断下载进程，并清理已下载片段、临时文件和任务记录。'
+      : '数据库记录会被软删除，关联文件也会从磁盘中移除。',
     okText: '确认删除',
     okType: 'danger',
     async onOk() {
       await deleteDownload(item.id)
+      downloads.removeLocal(item.id)
+      if (activeTab.value === 'active') {
+        await downloads.loadActive(activeList.value.page, activeList.value.pageSize)
+      } else {
+        await downloads.loadCompleted(completedList.value.page, completedList.value.pageSize)
+      }
       message.success('已删除')
     },
   })
-}
-
-async function stopTask(item: DownloadItem) {
-  await cancelDownload(item.id)
-  message.success('任务已取消')
 }
 
 async function retryTask(item: DownloadItem) {
@@ -118,13 +93,14 @@ async function retryTask(item: DownloadItem) {
 async function openPath(item: DownloadItem) {
   try {
     await openDownloadPath(item.id)
+    message.success('已打开文件位置')
   } catch (error) {
     message.error(error instanceof Error ? error.message : '打开文件路径失败')
   }
 }
 
 function formatSpeed(value: number) {
-  if (!value) {
+  if (!Number.isFinite(value) || value <= 0) {
     return '-'
   }
   const mib = value / 1024 / 1024
@@ -132,7 +108,7 @@ function formatSpeed(value: number) {
 }
 
 function formatETA(value: number) {
-  if (!value) {
+  if (!Number.isFinite(value) || value <= 0) {
     return '-'
   }
   const minutes = Math.floor(value / 60)
@@ -148,11 +124,13 @@ function formatDate(value?: string) {
 }
 
 function isRecordActive(record: DownloadItem) {
-  return record.status === 'queued' || record.status === 'downloading' || record.status === 'postprocessing'
+  return ['resolving', 'queued', 'downloading', 'postprocessing'].includes(record.status)
 }
 
 function formatStatus(status: string) {
   switch (status) {
+    case 'resolving':
+      return '解析中'
     case 'queued':
       return '排队中'
     case 'downloading':
@@ -185,14 +163,56 @@ function formatQuality(item: Pick<DownloadItem, 'qualityLabel' | 'container'>) {
   return '-'
 }
 
+function displayTitle(item: DownloadItem) {
+  return item.title?.trim() || '正在解析链接...'
+}
+
+function displaySubtitle(item: DownloadItem) {
+  if (item.videoId?.trim()) {
+    return item.videoId
+  }
+  return item.sourceUrl
+}
+
+function formatProgress(value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    return 0
+  }
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
+function connectionTagColor(state: string) {
+  switch (state) {
+    case 'connected':
+      return 'success'
+    case 'connecting':
+    case 'reconnecting':
+      return 'processing'
+    case 'error':
+      return 'warning'
+    default:
+      return 'default'
+  }
+}
+
+function connectionLabel(state: string) {
+  switch (state) {
+    case 'connected':
+      return '实时更新已连接'
+    case 'connecting':
+      return '正在连接实时更新'
+    case 'reconnecting':
+      return '正在重连实时更新'
+    case 'error':
+      return '实时更新已断开'
+    default:
+      return '实时更新未启动'
+  }
+}
+
 onMounted(() => {
   downloads.loadActive()
   downloads.loadCompleted()
-  downloads.connect()
-})
-
-onBeforeUnmount(() => {
-  downloads.disconnect()
 })
 </script>
 
@@ -201,7 +221,7 @@ onBeforeUnmount(() => {
     <section class="hero">
       <div>
         <div class="hero-kicker">YouTube / Shorts</div>
-        <h1>添加下载任务，并实时查看当前进度与清晰度。</h1>
+        <h1>输入链接后立刻加入任务列表，后台自动解析并实时显示下载进度和速度。</h1>
       </div>
       <a-card class="queue-card" :bordered="false">
         <a-space direction="vertical" style="width: 100%" size="middle">
@@ -209,32 +229,24 @@ onBeforeUnmount(() => {
             v-model:value="form.url"
             size="large"
             placeholder="https://www.youtube.com/watch?v=..."
-            @press-enter="parseURL"
+            @press-enter="submitDownload"
           />
-          <a-space wrap>
-            <a-button :loading="loadingInspect" @click="parseURL">解析链接</a-button>
-            <a-button type="primary" :loading="loadingCreate" @click="submitDownload">
-              加入下载队列
-            </a-button>
-          </a-space>
-          <a-alert v-if="duplicateText" type="warning" show-icon :message="duplicateText" />
-          <a-card v-if="inspect" size="small">
-            <a-space align="start" class="inspect-layout">
-              <a-image :width="160" :src="inspect.thumbnailUrl" :preview="false" />
-              <div class="inspect-copy">
-                <div class="inspect-title">{{ inspect.title }}</div>
-                <div>视频 ID：{{ inspect.videoId }}</div>
-                <div>预计大小：{{ (inspect.estimatedSizeBytes / 1024 / 1024).toFixed(2) }} MiB</div>
-                <div>预计清晰度：{{ formatQuality(inspect) }}</div>
-                <div>建议文件名：{{ inspect.suggestedFilename }}</div>
-              </div>
-            </a-space>
-          </a-card>
+          <a-button type="primary" size="large" :loading="loadingCreate" @click="submitDownload">
+            加入下载队列
+          </a-button>
+          <div class="queue-note">网络较慢时，任务会先显示“解析中”，稍后自动补齐视频信息并开始下载。</div>
         </a-space>
       </a-card>
     </section>
 
     <a-card :bordered="false">
+      <div class="connection-banner">
+        <a-tag :color="connectionTagColor(connectionState)">{{ connectionLabel(connectionState) }}</a-tag>
+        <span class="connection-copy">
+          {{ connectionMessage || '下载列表会通过 SSE 实时刷新任务状态、进度和速度。' }}
+        </span>
+      </div>
+
       <a-tabs v-model:activeKey="activeTab">
         <a-tab-pane key="active" tab="下载中">
           <a-table
@@ -247,10 +259,11 @@ onBeforeUnmount(() => {
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'video'">
                 <div class="video-cell">
-                  <a-image :width="120" :src="record.thumbnailUrl" :preview="false" />
+                  <a-image v-if="record.thumbnailUrl" :width="120" :src="record.thumbnailUrl" :preview="false" />
+                  <div v-else class="thumb-placeholder">解析中</div>
                   <div>
-                    <div class="video-title">{{ record.title }}</div>
-                    <div class="muted">{{ record.videoId }}</div>
+                    <div class="video-title">{{ displayTitle(record) }}</div>
+                    <div class="muted">{{ displaySubtitle(record) }}</div>
                     <div v-if="record.errorMessage" class="error-copy">{{ record.errorMessage }}</div>
                   </div>
                 </div>
@@ -263,7 +276,7 @@ onBeforeUnmount(() => {
               </template>
               <template v-else-if="column.key === 'progress'">
                 <a-progress
-                  :percent="Math.round(record.progressPercent)"
+                  :percent="formatProgress(record.progressPercent)"
                   :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined"
                 />
               </template>
@@ -278,11 +291,6 @@ onBeforeUnmount(() => {
               </template>
               <template v-else-if="column.key === 'action'">
                 <a-space>
-                  <a-tooltip title="取消任务">
-                    <a-button size="small" @click="stopTask(record)">
-                      <template #icon><StopOutlined /></template>
-                    </a-button>
-                  </a-tooltip>
                   <a-tooltip title="重新下载">
                     <a-button size="small" :disabled="isRecordActive(record)" @click="retryTask(record)">
                       <template #icon><RedoOutlined /></template>
@@ -302,15 +310,16 @@ onBeforeUnmount(() => {
             <div v-if="activeList.items.length === 0" class="mobile-empty">暂无下载中的任务</div>
             <div v-for="record in activeList.items" :key="record.id" class="mobile-card">
               <div class="mobile-card-top">
-                <a-image :width="96" :src="record.thumbnailUrl" :preview="false" />
+                <a-image v-if="record.thumbnailUrl" :width="96" :src="record.thumbnailUrl" :preview="false" />
+                <div v-else class="thumb-placeholder mobile-thumb">解析中</div>
                 <div class="mobile-copy">
-                  <div class="video-title">{{ record.title }}</div>
-                  <div class="muted">{{ record.videoId }}</div>
+                  <div class="video-title">{{ displayTitle(record) }}</div>
+                  <div class="muted">{{ displaySubtitle(record) }}</div>
                   <div class="mobile-status">{{ formatStatus(record.status) }}</div>
                 </div>
               </div>
               <a-progress
-                :percent="Math.round(record.progressPercent)"
+                :percent="formatProgress(record.progressPercent)"
                 :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined"
               />
               <div class="mobile-meta">
@@ -321,10 +330,6 @@ onBeforeUnmount(() => {
               </div>
               <div v-if="record.errorMessage" class="error-copy">{{ record.errorMessage }}</div>
               <a-space wrap>
-                <a-button size="small" @click="stopTask(record)">
-                  <template #icon><StopOutlined /></template>
-                  取消
-                </a-button>
                 <a-button size="small" :disabled="isRecordActive(record)" @click="retryTask(record)">
                   <template #icon><RedoOutlined /></template>
                   重试
@@ -359,8 +364,9 @@ onBeforeUnmount(() => {
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'video'">
                 <div class="video-cell">
-                  <a-image :width="120" :src="record.thumbnailUrl" :preview="false" />
-                  <div class="video-title">{{ record.title }}</div>
+                  <a-image v-if="record.thumbnailUrl" :width="120" :src="record.thumbnailUrl" :preview="false" />
+                  <div v-else class="thumb-placeholder">视频</div>
+                  <div class="video-title">{{ displayTitle(record) }}</div>
                 </div>
               </template>
               <template v-else-if="column.key === 'quality'">
@@ -390,16 +396,17 @@ onBeforeUnmount(() => {
             <div v-if="completedList.items.length === 0" class="mobile-empty">暂无已完成任务</div>
             <div v-for="record in completedList.items" :key="record.id" class="mobile-card">
               <div class="mobile-card-top">
-                <a-image :width="96" :src="record.thumbnailUrl" :preview="false" />
+                <a-image v-if="record.thumbnailUrl" :width="96" :src="record.thumbnailUrl" :preview="false" />
+                <div v-else class="thumb-placeholder mobile-thumb">视频</div>
                 <div class="mobile-copy">
-                  <div class="video-title">{{ record.title }}</div>
+                  <div class="video-title">{{ displayTitle(record) }}</div>
                   <div class="muted">完成时间：{{ formatDate(record.completedAt) }}</div>
                 </div>
               </div>
               <div class="mobile-meta">
                 <span>清晰度：{{ formatQuality(record) }}</span>
-                <span>文件：{{ record.outputFilename }}</span>
-                <span>路径：{{ record.outputPath }}</span>
+                <span>文件：{{ record.outputFilename || '-' }}</span>
+                <span>路径：{{ record.outputPath || '-' }}</span>
               </div>
               <a-space wrap>
                 <a-button size="small" @click="openPath(record)">
@@ -463,16 +470,26 @@ onBeforeUnmount(() => {
   box-shadow: 0 16px 44px rgba(21, 43, 73, 0.11);
 }
 
-.inspect-layout {
-  width: 100%;
+.queue-note {
+  color: #5d7390;
+  font-size: 13px;
 }
 
-.inspect-copy {
-  display: grid;
-  gap: 8px;
+.connection-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(237, 244, 255, 0.78);
 }
 
-.inspect-title,
+.connection-copy {
+  color: #58708f;
+  font-size: 13px;
+}
+
 .video-title {
   font-weight: 700;
 }
@@ -484,8 +501,25 @@ onBeforeUnmount(() => {
   align-items: center;
 }
 
+.thumb-placeholder {
+  width: 120px;
+  height: 68px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #d8e6f5, #eef4fb);
+  color: #58708f;
+  font-weight: 600;
+}
+
+.mobile-thumb {
+  width: 96px;
+  height: 54px;
+}
+
 .muted {
   color: #6f89a4;
+  word-break: break-all;
 }
 
 .error-copy {
@@ -559,14 +593,6 @@ onBeforeUnmount(() => {
     font-size: clamp(26px, 9vw, 38px);
   }
 
-  .inspect-layout :deep(.ant-space-item:first-child) {
-    width: 100%;
-  }
-
-  .inspect-layout {
-    display: grid;
-  }
-
   .desktop-table {
     display: none;
   }
@@ -577,6 +603,11 @@ onBeforeUnmount(() => {
 
   .page {
     gap: 16px;
+  }
+
+  .connection-banner {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .video-cell {

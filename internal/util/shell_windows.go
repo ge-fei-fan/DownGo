@@ -1,13 +1,13 @@
 package util
 
 import (
-	"fmt"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 )
 
 func OpenFolderAndSelectFile(path string) error {
-	cmd := exec.Command("explorer.exe", fmt.Sprintf("/select,%s", path))
+	cmd := exec.Command("explorer.exe", "/select,", filepath.Clean(path))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Start()
 }

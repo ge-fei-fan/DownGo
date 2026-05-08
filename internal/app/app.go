@@ -22,12 +22,15 @@ import (
 )
 
 type App struct {
-	baseDir  string
-	logger   *zap.Logger
-	store    *db.Store
-	settings *config.Service
-	http     *http.Server
-	password string
+	baseDir   string
+	logger    *zap.Logger
+	store     *db.Store
+	settings  *config.Service
+	http      *http.Server
+	password  string
+	manager   *download.Manager
+	appCtx    context.Context
+	appCancel context.CancelFunc
 
 	mu       sync.RWMutex
 	listener net.Listener
@@ -73,23 +76,28 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 	tokens := auth.NewTokenManager(baseDir + "|downgo")
 	api := httpapi.NewAPI(settingsService, manager, depsService, tokens)
 	router := httpapi.NewRouter(api, webui.Assets)
+	appCtx, appCancel := context.WithCancel(context.Background())
 
 	current := settingsService.Current()
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", current.BindHost, current.Port),
 		Handler:           router,
+		BaseContext:       func(net.Listener) context.Context { return appCtx },
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
 	return &App{
-		baseDir:  baseDir,
-		logger:   logger,
-		store:    store,
-		settings: settingsService,
-		http:     httpServer,
-		password: initialPassword,
-		status:   "未启动",
-		errCh:    make(chan error, 1),
+		baseDir:   baseDir,
+		logger:    logger,
+		store:     store,
+		settings:  settingsService,
+		http:      httpServer,
+		password:  initialPassword,
+		manager:   manager,
+		appCtx:    appCtx,
+		appCancel: appCancel,
+		status:    "未启动",
+		errCh:     make(chan error, 1),
 	}, nil
 }
 
@@ -149,8 +157,34 @@ func (a *App) Shutdown(ctx context.Context) error {
 
 	var shutdownErr error
 	a.closeOnce.Do(func() {
-		shutdownErr = a.http.Shutdown(ctx)
-		_ = a.store.Close()
+		if a.appCancel != nil {
+			a.appCancel()
+		}
+
+		if a.manager != nil {
+			if err := a.manager.Shutdown(ctx); err != nil {
+				shutdownErr = err
+			}
+		}
+
+		if a.http != nil {
+			if err := a.http.Shutdown(ctx); err != nil {
+				if closeErr := a.http.Close(); closeErr != nil {
+					if a.logger != nil {
+						a.logger.Error("forced http close failed", zap.Error(closeErr), zap.Error(err))
+					}
+					if shutdownErr == nil {
+						shutdownErr = closeErr
+					}
+				} else if a.logger != nil {
+					a.logger.Warn("graceful http shutdown timed out; forced close completed", zap.Error(err))
+				}
+			}
+		}
+
+		if a.store != nil {
+			_ = a.store.Close()
+		}
 		a.setStatus("已停止")
 	})
 

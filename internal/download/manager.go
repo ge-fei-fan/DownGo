@@ -13,20 +13,39 @@ import (
 	"example.com/downgo/internal/util"
 )
 
+const (
+	placeholderTitle  = "正在解析链接..."
+	deleteWaitTimeout = 5 * time.Second
+)
+
 type Manager struct {
 	store    *db.Store
 	settings *config.Service
 	runner   Runner
 
-	mu          sync.Mutex
-	queue       []int64
-	active      map[int64]*activeJob
-	subscribers map[chan domain.DownloadEvent]struct{}
+	mu           sync.Mutex
+	queue        []int64
+	active       map[int64]*activeJob
+	resolving    map[int64]*resolvingJob
+	subscribers  map[chan domain.DownloadEvent]struct{}
+	jobs         sync.WaitGroup
+	shuttingDown bool
 }
 
 type activeJob struct {
 	cancel context.CancelFunc
 	pid    int
+	done   chan struct{}
+}
+
+type resolvingJob struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+type trackedTaskHandles struct {
+	resolving *resolvingJob
+	active    *activeJob
 }
 
 func NewManager(store *db.Store, settings *config.Service, runner Runner) (*Manager, error) {
@@ -35,6 +54,7 @@ func NewManager(store *db.Store, settings *config.Service, runner Runner) (*Mana
 		settings:    settings,
 		runner:      runner,
 		active:      map[int64]*activeJob{},
+		resolving:   map[int64]*resolvingJob{},
 		subscribers: map[chan domain.DownloadEvent]struct{}{},
 	}
 
@@ -66,7 +86,7 @@ func (m *Manager) Inspect(ctx context.Context, url string) (domain.InspectResult
 	if err != nil {
 		return domain.InspectResult{}, err
 	}
-	duplicate, err := m.findBlockingDuplicate(meta.VideoID)
+	duplicate, err := m.findBlockingDuplicate(meta.VideoID, 0)
 	if err != nil {
 		return domain.InspectResult{}, err
 	}
@@ -80,31 +100,20 @@ func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, 
 		return domain.DownloadItem{}, err
 	}
 
-	meta, err := m.Inspect(ctx, sourceURL)
-	if err != nil {
+	settings := m.settings.Current()
+	if err := ensureBinaries(settings); err != nil {
 		return domain.DownloadItem{}, err
 	}
-	if meta.DuplicateOf != nil {
-		return domain.DownloadItem{}, ErrAlreadyDownloaded{Existing: *meta.DuplicateOf}
-	}
-
-	settings := m.settings.Current()
 	if err := util.EnsureDir(settings.DownloadDir); err != nil {
 		return domain.DownloadItem{}, err
 	}
 
 	item := domain.DownloadItem{
 		SourceURL:       sourceURL,
-		NormalizedURL:   meta.NormalizedURL,
+		NormalizedURL:   sourceURL,
 		Platform:        domain.PlatformYouTube,
-		VideoID:         meta.VideoID,
-		Title:           meta.Title,
-		ThumbnailURL:    meta.ThumbnailURL,
-		QualityLabel:    meta.QualityLabel,
-		Container:       meta.Container,
-		OutputFilename:  meta.SuggestedFilename,
-		OutputPath:      filepath.Join(settings.DownloadDir, meta.SuggestedFilename),
-		Status:          domain.StatusQueued,
+		Title:           placeholderTitle,
+		Status:          domain.StatusResolving,
 		ProgressPercent: 0,
 		SpeedBPS:        0,
 		ETASeconds:      0,
@@ -112,20 +121,11 @@ func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, 
 
 	item, err = m.store.CreateDownload(item)
 	if err != nil {
-		if errors.Is(err, db.ErrDuplicate) {
-			duplicate, dupErr := m.findBlockingDuplicate(item.VideoID)
-			if dupErr != nil {
-				return domain.DownloadItem{}, dupErr
-			}
-			if duplicate != nil {
-				return domain.DownloadItem{}, ErrAlreadyDownloaded{Existing: *duplicate}
-			}
-		}
 		return domain.DownloadItem{}, err
 	}
 
 	m.broadcast(domain.DownloadEvent{Type: "created", Item: item})
-	m.enqueue(item.ID)
+	m.startResolving(item.ID, sourceURL)
 	return item, nil
 }
 
@@ -134,8 +134,18 @@ func (m *Manager) Retry(id int64) (domain.DownloadItem, error) {
 	if err != nil {
 		return domain.DownloadItem{}, err
 	}
-	if item.Status != domain.StatusFailed && item.Status != domain.StatusCanceled {
-		return domain.DownloadItem{}, errors.New("只有失败或已取消的任务才能重试")
+	if item.Status != domain.StatusFailed {
+		return domain.DownloadItem{}, errors.New("只有失败的任务才能重试")
+	}
+
+	if item.VideoID == "" {
+		updated, err := m.store.UpdateProgress(id, domain.StatusResolving, 0, 0, 0, 0, "", "", "", nil, nil)
+		if err != nil {
+			return domain.DownloadItem{}, err
+		}
+		m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+		m.startResolving(id, item.SourceURL)
+		return updated, nil
 	}
 
 	updated, err := m.store.UpdateProgress(id, domain.StatusQueued, 0, 0, 0, 0, "", item.QualityLabel, item.Container, nil, nil)
@@ -153,23 +163,14 @@ func (m *Manager) Cancel(id int64) (domain.DownloadItem, error) {
 		return domain.DownloadItem{}, err
 	}
 
-	m.mu.Lock()
-	job, ok := m.active[id]
-	m.mu.Unlock()
-
-	if ok {
-		if job.pid > 0 {
-			_ = KillProcessTree(job.pid)
-		}
-		job.cancel()
-	}
+	handles := m.stopTrackedTask(id)
+	m.cancelTrackedTask(handles)
 
 	now := time.Now().UTC()
 	updated, err := m.store.UpdateProgress(id, domain.StatusCanceled, item.ProgressPercent, 0, 0, 0, "用户已取消", item.QualityLabel, item.Container, item.StartedAt, &now)
 	if err != nil {
 		return domain.DownloadItem{}, err
 	}
-	m.finishActive(id)
 	m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 	return updated, nil
 }
@@ -180,14 +181,18 @@ func (m *Manager) Delete(id int64) error {
 		return err
 	}
 
-	if item.Status == domain.StatusQueued || item.Status == domain.StatusDownloading || item.Status == domain.StatusPostprocessing {
-		if _, err := m.Cancel(id); err != nil {
-			return err
-		}
+	if isWorkingStatus(item.Status) {
+		handles := m.stopTrackedTask(id)
+		m.cancelTrackedTask(handles)
+		m.waitForTrackedTask(handles, deleteWaitTimeout)
+	} else {
+		m.removeQueued(id)
 	}
 
-	if err := util.DeleteAssociatedFiles(item.OutputPath); err != nil {
-		return err
+	if item.OutputPath != "" {
+		if err := util.DeleteAssociatedFiles(item.OutputPath); err != nil {
+			m.scheduleDeleteRetry(item.OutputPath)
+		}
 	}
 	if err := m.store.MarkDeleted(id); err != nil {
 		return err
@@ -233,9 +238,99 @@ func (m *Manager) Subscribe() (<-chan domain.DownloadEvent, func()) {
 	}
 }
 
+func (m *Manager) startResolving(id int64, sourceURL string) {
+	m.mu.Lock()
+	if m.shuttingDown {
+		m.mu.Unlock()
+		return
+	}
+	if _, ok := m.resolving[id]; ok {
+		m.mu.Unlock()
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	job := &resolvingJob{
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	m.resolving[id] = job
+	m.jobs.Add(1)
+	m.mu.Unlock()
+
+	go m.resolveAndQueue(ctx, id, sourceURL, job)
+}
+
+func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL string, job *resolvingJob) {
+	defer m.jobs.Done()
+	defer close(job.done)
+	defer m.finishResolving(id, job)
+
+	settings := m.settings.Current()
+	meta, err := m.runner.Inspect(ctx, settings, sourceURL)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, err.Error(), "", "", nil, nil)
+		if updateErr == nil {
+			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+		}
+		return
+	}
+
+	duplicate, err := m.findBlockingDuplicate(meta.VideoID, id)
+	if err != nil {
+		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, err.Error(), "", "", nil, nil)
+		if updateErr == nil {
+			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+		}
+		return
+	}
+	if duplicate != nil {
+		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, "该视频已存在任务", "", "", nil, nil)
+		if updateErr == nil {
+			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+		}
+		return
+	}
+
+	update := domain.DownloadItem{
+		NormalizedURL:  meta.NormalizedURL,
+		Platform:       domain.PlatformYouTube,
+		VideoID:        meta.VideoID,
+		Title:          meta.Title,
+		ThumbnailURL:   meta.ThumbnailURL,
+		QualityLabel:   meta.QualityLabel,
+		Container:      meta.Container,
+		OutputFilename: meta.SuggestedFilename,
+		OutputPath:     filepath.Join(settings.DownloadDir, meta.SuggestedFilename),
+	}
+
+	updated, err := m.store.UpdateMetadata(id, update, domain.StatusQueued, "")
+	if err != nil {
+		errMsg := err.Error()
+		if errors.Is(err, db.ErrDuplicate) {
+			errMsg = "该视频已存在任务"
+		}
+		failed, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, errMsg, "", "", nil, nil)
+		if updateErr == nil {
+			m.broadcast(domain.DownloadEvent{Type: "updated", Item: failed})
+		}
+		return
+	}
+
+	m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+	m.enqueue(id)
+}
+
 func (m *Manager) enqueue(id int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.shuttingDown {
+		return
+	}
 
 	for _, existing := range m.queue {
 		if existing == id {
@@ -251,6 +346,10 @@ func (m *Manager) enqueue(id int64) {
 }
 
 func (m *Manager) scheduleLocked() {
+	if m.shuttingDown {
+		return
+	}
+
 	limit := m.settings.Current().ConcurrentDownloads
 	if limit <= 0 {
 		limit = 1
@@ -259,16 +358,25 @@ func (m *Manager) scheduleLocked() {
 	for len(m.active) < limit && len(m.queue) > 0 {
 		id := m.queue[0]
 		m.queue = m.queue[1:]
+
 		ctx, cancel := context.WithCancel(context.Background())
-		m.active[id] = &activeJob{cancel: cancel}
-		go m.runJob(ctx, id)
+		job := &activeJob{
+			cancel: cancel,
+			done:   make(chan struct{}),
+		}
+		m.active[id] = job
+		m.jobs.Add(1)
+		go m.runJob(ctx, id, job)
 	}
 }
 
-func (m *Manager) runJob(ctx context.Context, id int64) {
+func (m *Manager) runJob(ctx context.Context, id int64, job *activeJob) {
+	defer m.jobs.Done()
+	defer close(job.done)
+	defer m.finishActive(id, job)
+
 	item, err := m.store.GetDownload(id)
 	if err != nil {
-		m.finishActive(id)
 		return
 	}
 
@@ -276,14 +384,17 @@ func (m *Manager) runJob(ctx context.Context, id int64) {
 	startedAt := time.Now().UTC()
 	currentQualityLabel := item.QualityLabel
 	currentContainer := item.Container
-	_, _ = m.store.UpdateProgress(id, domain.StatusDownloading, 0, 0, 0, 0, "", currentQualityLabel, currentContainer, &startedAt, nil)
+	if updated, err := m.store.UpdateProgress(id, domain.StatusDownloading, 0, 0, 0, 0, "", currentQualityLabel, currentContainer, &startedAt, nil); err == nil {
+		m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+	}
 
 	onStart := func(pid int) {
 		m.mu.Lock()
-		if job, ok := m.active[id]; ok {
-			job.pid = pid
+		if current, ok := m.active[id]; ok && current == job {
+			current.pid = pid
 		}
 		m.mu.Unlock()
+
 		updated, err := m.store.UpdateProgress(id, domain.StatusDownloading, 0, 0, 0, pid, "", currentQualityLabel, currentContainer, &startedAt, nil)
 		if err == nil {
 			currentQualityLabel = updated.QualityLabel
@@ -325,15 +436,162 @@ func (m *Manager) runJob(ctx context.Context, id int64) {
 			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		}
 	}
-
-	m.finishActive(id)
 }
 
-func (m *Manager) finishActive(id int64) {
+func (m *Manager) finishResolving(id int64, job *resolvingJob) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.active, id)
+	if current, ok := m.resolving[id]; ok && current == job {
+		delete(m.resolving, id)
+	}
+}
+
+func (m *Manager) finishActive(id int64, job *activeJob) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, ok := m.active[id]; ok && current == job {
+		delete(m.active, id)
+	}
 	m.scheduleLocked()
+}
+
+func (m *Manager) stopTrackedTask(id int64) trackedTaskHandles {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	handles := trackedTaskHandles{
+		resolving: m.resolving[id],
+		active:    m.active[id],
+	}
+
+	if handles.resolving != nil {
+		delete(m.resolving, id)
+	}
+	if handles.active != nil {
+		delete(m.active, id)
+	}
+	m.removeQueuedLocked(id)
+	if handles.active != nil {
+		m.scheduleLocked()
+	}
+
+	return handles
+}
+
+func (m *Manager) cancelTrackedTask(handles trackedTaskHandles) {
+	if handles.resolving != nil {
+		handles.resolving.cancel()
+	}
+	if handles.active != nil {
+		if handles.active.pid > 0 {
+			_ = KillProcessTree(handles.active.pid)
+		}
+		handles.active.cancel()
+	}
+}
+
+func (m *Manager) waitForTrackedTask(handles trackedTaskHandles, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if handles.resolving != nil {
+		select {
+		case <-handles.resolving.done:
+		case <-ctx.Done():
+			return
+		}
+	}
+	if handles.active != nil {
+		select {
+		case <-handles.active.done:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (m *Manager) removeQueued(id int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeQueuedLocked(id)
+}
+
+func (m *Manager) removeQueuedLocked(id int64) {
+	if len(m.queue) == 0 {
+		return
+	}
+	next := m.queue[:0]
+	for _, queuedID := range m.queue {
+		if queuedID != id {
+			next = append(next, queuedID)
+		}
+	}
+	m.queue = next
+}
+
+func (m *Manager) cancelResolving(id int64) {
+	m.mu.Lock()
+	job := m.resolving[id]
+	if job != nil {
+		delete(m.resolving, id)
+	}
+	m.mu.Unlock()
+	if job != nil {
+		job.cancel()
+	}
+}
+
+func (m *Manager) scheduleDeleteRetry(outputPath string) {
+	go func(path string) {
+		for attempt := 0; attempt < 5; attempt++ {
+			time.Sleep(time.Second)
+			if err := util.DeleteAssociatedFiles(path); err == nil {
+				return
+			}
+		}
+	}(outputPath)
+}
+
+func (m *Manager) Shutdown(ctx context.Context) error {
+	m.mu.Lock()
+	m.shuttingDown = true
+	m.queue = nil
+
+	resolveJobs := make([]*resolvingJob, 0, len(m.resolving))
+	for id, job := range m.resolving {
+		resolveJobs = append(resolveJobs, job)
+		delete(m.resolving, id)
+	}
+
+	activeJobs := make([]*activeJob, 0, len(m.active))
+	for id, job := range m.active {
+		activeJobs = append(activeJobs, job)
+		delete(m.active, id)
+	}
+	m.mu.Unlock()
+
+	for _, job := range resolveJobs {
+		job.cancel()
+	}
+	for _, job := range activeJobs {
+		if job.pid > 0 {
+			_ = KillProcessTree(job.pid)
+		}
+		job.cancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.jobs.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *Manager) activePID(id int64) int {
@@ -356,15 +614,19 @@ func (m *Manager) broadcast(event domain.DownloadEvent) {
 	}
 }
 
-func (m *Manager) findBlockingDuplicate(videoID string) (*domain.DownloadItem, error) {
+func (m *Manager) findBlockingDuplicate(videoID string, excludeID int64) (*domain.DownloadItem, error) {
 	items, err := m.store.FindByVideoID(videoID)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, item := range items {
+		if excludeID > 0 && item.ID == excludeID {
+			continue
+		}
+
 		switch item.Status {
-		case domain.StatusQueued, domain.StatusDownloading, domain.StatusPostprocessing:
+		case domain.StatusResolving, domain.StatusQueued, domain.StatusDownloading, domain.StatusPostprocessing:
 			return &item, nil
 		case domain.StatusCompleted:
 			if util.FileExists(item.OutputPath) {
@@ -386,6 +648,15 @@ func ensureBinaries(settings config.Settings) error {
 		return errors.New("未找到 ffmpeg.exe，请到设置页下载安装依赖或手动配置路径")
 	}
 	return nil
+}
+
+func isWorkingStatus(status string) bool {
+	switch status {
+	case domain.StatusResolving, domain.StatusQueued, domain.StatusDownloading, domain.StatusPostprocessing:
+		return true
+	default:
+		return false
+	}
 }
 
 type ErrAlreadyDownloaded struct {

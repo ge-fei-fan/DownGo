@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS downloads (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_downloads_video_active
 ON downloads(platform, video_id)
 WHERE deleted_at IS NULL
-  AND status IN ('queued', 'downloading', 'postprocessing', 'completed');
+  AND video_id <> ''
+  AND status IN ('resolving', 'queued', 'downloading', 'postprocessing', 'completed');
 
 CREATE INDEX IF NOT EXISTS idx_downloads_view
 ON downloads(deleted_at, status, created_at DESC);

@@ -42,6 +42,15 @@ export type PagedDownloads = {
   pageSize: number
 }
 
+function normalizePagedDownloads(payload: PagedDownloads): PagedDownloads {
+  return {
+    items: Array.isArray(payload?.items) ? payload.items : [],
+    total: payload?.total ?? 0,
+    page: payload?.page ?? 1,
+    pageSize: payload?.pageSize ?? 20,
+  }
+}
+
 export type SettingsDTO = {
   bindHost: string
   port: number
@@ -68,6 +77,12 @@ export type DependenciesDTO = {
 export type DownloadEvent = {
   type: 'created' | 'updated' | 'removed'
   item: DownloadItem
+}
+
+type OpenDownloadEventsOptions = {
+  onMessage: (event: DownloadEvent) => void
+  onOpen?: () => void
+  onError?: () => void
 }
 
 let token = ''
@@ -145,11 +160,8 @@ export async function createDownload(url: string) {
 }
 
 export async function listDownloads(view: 'active' | 'completed', page = 1, pageSize = 20) {
-  return request<PagedDownloads>(`/api/downloads?view=${view}&page=${page}&pageSize=${pageSize}`)
-}
-
-export async function cancelDownload(id: number) {
-  return request<DownloadItem>(`/api/downloads/${id}/cancel`, { method: 'POST' })
+  const payload = await request<PagedDownloads>(`/api/downloads?view=${view}&page=${page}&pageSize=${pageSize}`)
+  return normalizePagedDownloads(payload)
 }
 
 export async function retryDownload(id: number) {
@@ -169,12 +181,18 @@ export function downloadFileURL(id: number) {
   return `/api/downloads/${id}/file${query}`
 }
 
-export function openDownloadEvents(onMessage: (event: DownloadEvent) => void) {
+export function openDownloadEvents(options: OpenDownloadEventsOptions) {
   const query = token ? `?token=${encodeURIComponent(token)}` : ''
   const source = new EventSource(`/api/downloads/events${query}`)
+  source.onopen = () => {
+    options.onOpen?.()
+  }
   source.onmessage = (event) => {
     const payload = JSON.parse(event.data) as DownloadEvent
-    onMessage(payload)
+    options.onMessage(payload)
+  }
+  source.onerror = () => {
+    options.onError?.()
   }
   return source
 }
