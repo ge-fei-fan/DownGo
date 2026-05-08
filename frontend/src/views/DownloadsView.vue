@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { DeleteOutlined, DownloadOutlined, RedoOutlined, StopOutlined } from '@ant-design/icons-vue'
 
@@ -9,23 +9,19 @@ import {
   deleteDownload,
   downloadFileURL,
   inspectDownload,
-  listDownloads,
-  openDownloadEvents,
   retryDownload,
-  type DownloadEvent,
   type DownloadItem,
   type InspectResult,
-  type PagedDownloads,
 } from '@/api/client'
+import { useDownloadsStore } from '@/stores/downloads'
+
+const downloads = useDownloadsStore()
 
 const loadingInspect = ref(false)
 const loadingCreate = ref(false)
 const activeTab = ref<'active' | 'completed'>('active')
 const form = reactive({ url: '' })
 const inspect = ref<InspectResult | null>(null)
-const activeList = ref<PagedDownloads>({ items: [], total: 0, page: 1, pageSize: 20 })
-const completedList = ref<PagedDownloads>({ items: [], total: 0, page: 1, pageSize: 20 })
-let source: EventSource | null = null
 
 const activeColumns = [
   { title: '视频', key: 'video' },
@@ -45,20 +41,15 @@ const completedColumns = [
   { title: '操作', key: 'action', width: 220 },
 ]
 
+const activeList = computed(() => downloads.activeList)
+const completedList = computed(() => downloads.completedList)
+
 const duplicateText = computed(() => {
   if (!inspect.value?.duplicateOf) {
     return ''
   }
   return `该视频已存在任务：${inspect.value.duplicateOf.title}`
 })
-
-async function loadActive(page = activeList.value.page, pageSize = activeList.value.pageSize) {
-  activeList.value = await listDownloads('active', page, pageSize)
-}
-
-async function loadCompleted(page = completedList.value.page, pageSize = completedList.value.pageSize) {
-  completedList.value = await listDownloads('completed', page, pageSize)
-}
 
 async function parseURL() {
   if (!form.url.trim()) {
@@ -146,6 +137,10 @@ function formatDate(value?: string) {
   return new Date(value).toLocaleString()
 }
 
+function isRecordActive(record: DownloadItem) {
+  return record.status === 'queued' || record.status === 'downloading' || record.status === 'postprocessing'
+}
+
 function formatStatus(status: string) {
   switch (status) {
     case 'queued':
@@ -165,48 +160,9 @@ function formatStatus(status: string) {
   }
 }
 
-function upsertItem(list: PagedDownloads, item: DownloadItem) {
-  const index = list.items.findIndex((entry) => entry.id === item.id)
-  if (index >= 0) {
-    list.items[index] = item
-  } else {
-    list.items.unshift(item)
-    list.total += 1
-  }
-}
-
-function removeItem(list: PagedDownloads, id: number) {
-  const next = list.items.filter((entry) => entry.id !== id)
-  if (next.length !== list.items.length) {
-    list.items = next
-    list.total = Math.max(0, list.total - 1)
-  }
-}
-
-function applyEvent(event: DownloadEvent) {
-  if (event.type === 'removed') {
-    removeItem(activeList.value, event.item.id)
-    removeItem(completedList.value, event.item.id)
-    return
-  }
-
-  if (event.item.status === 'completed') {
-    removeItem(activeList.value, event.item.id)
-    upsertItem(completedList.value, event.item)
-    return
-  }
-
-  removeItem(completedList.value, event.item.id)
-  upsertItem(activeList.value, event.item)
-}
-
-onMounted(async () => {
-  await Promise.all([loadActive(), loadCompleted()])
-  source = openDownloadEvents((event) => applyEvent(event))
-})
-
-onBeforeUnmount(() => {
-  source?.close()
+onMounted(() => {
+  downloads.loadActive()
+  downloads.loadCompleted()
 })
 </script>
 
@@ -255,7 +211,7 @@ onBeforeUnmount(() => {
             row-key="id"
             :columns="activeColumns"
             :data-source="activeList.items"
-            :pagination="{ current: activeList.page, pageSize: activeList.pageSize, total: activeList.total, onChange: loadActive }"
+            :pagination="{ current: activeList.page, pageSize: activeList.pageSize, total: activeList.total, onChange: downloads.loadActive }"
           >
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'video'">
@@ -269,7 +225,7 @@ onBeforeUnmount(() => {
                 </div>
               </template>
               <template v-else-if="column.key === 'progress'">
-                <a-progress :percent="Math.round(record.progressPercent)" />
+                <a-progress :percent="Math.round(record.progressPercent)" :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined" />
               </template>
               <template v-else-if="column.key === 'status'">
                 {{ formatStatus(record.status) }}
@@ -285,15 +241,21 @@ onBeforeUnmount(() => {
               </template>
               <template v-else-if="column.key === 'action'">
                 <a-space>
-                  <a-button size="small" @click="stopTask(record)">
-                    <template #icon><StopOutlined /></template>
-                  </a-button>
-                  <a-button size="small" @click="retryTask(record)">
-                    <template #icon><RedoOutlined /></template>
-                  </a-button>
-                  <a-button danger size="small" @click="confirmDelete(record)">
-                    <template #icon><DeleteOutlined /></template>
-                  </a-button>
+                  <a-tooltip title="取消任务">
+                    <a-button size="small" @click="stopTask(record)">
+                      <template #icon><StopOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
+                  <a-tooltip title="重新下载">
+                    <a-button size="small" :disabled="isRecordActive(record)" @click="retryTask(record)">
+                      <template #icon><RedoOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
+                  <a-tooltip title="删除记录和文件">
+                    <a-button danger size="small" @click="confirmDelete(record)">
+                      <template #icon><DeleteOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
                 </a-space>
               </template>
             </template>
@@ -310,7 +272,7 @@ onBeforeUnmount(() => {
                   <div class="mobile-status">{{ formatStatus(record.status) }}</div>
                 </div>
               </div>
-              <a-progress :percent="Math.round(record.progressPercent)" />
+              <a-progress :percent="Math.round(record.progressPercent)" :stroke-color="record.status === 'postprocessing' ? '#fa8c16' : undefined" />
               <div class="mobile-meta">
                 <span>速度：{{ formatSpeed(record.speedBps) }}</span>
                 <span>剩余：{{ formatETA(record.etaSeconds) }}</span>
@@ -322,7 +284,7 @@ onBeforeUnmount(() => {
                   <template #icon><StopOutlined /></template>
                   取消
                 </a-button>
-                <a-button size="small" @click="retryTask(record)">
+                <a-button size="small" :disabled="isRecordActive(record)" @click="retryTask(record)">
                   <template #icon><RedoOutlined /></template>
                   重试
                 </a-button>
@@ -340,7 +302,7 @@ onBeforeUnmount(() => {
               :page-size="activeList.pageSize"
               :total="activeList.total"
               simple
-              @change="loadActive"
+              @change="downloads.loadActive"
             />
           </div>
         </a-tab-pane>
@@ -351,7 +313,7 @@ onBeforeUnmount(() => {
             row-key="id"
             :columns="completedColumns"
             :data-source="completedList.items"
-            :pagination="{ current: completedList.page, pageSize: completedList.pageSize, total: completedList.total, onChange: loadCompleted }"
+            :pagination="{ current: completedList.page, pageSize: completedList.pageSize, total: completedList.total, onChange: downloads.loadCompleted }"
           >
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'video'">
@@ -365,15 +327,21 @@ onBeforeUnmount(() => {
               </template>
               <template v-else-if="column.key === 'action'">
                 <a-space>
-                  <a-button size="small" :href="downloadFileURL(record.id)" target="_blank">
-                    <template #icon><DownloadOutlined /></template>
-                  </a-button>
-                  <a-button size="small" @click="retryTask(record)">
-                    <template #icon><RedoOutlined /></template>
-                  </a-button>
-                  <a-button danger size="small" @click="confirmDelete(record)">
-                    <template #icon><DeleteOutlined /></template>
-                  </a-button>
+                  <a-tooltip title="下载文件">
+                    <a-button size="small" :href="downloadFileURL(record.id)" target="_blank">
+                      <template #icon><DownloadOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
+                  <a-tooltip title="重新下载">
+                    <a-button size="small" @click="retryTask(record)">
+                      <template #icon><RedoOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
+                  <a-tooltip title="删除记录和文件">
+                    <a-button danger size="small" @click="confirmDelete(record)">
+                      <template #icon><DeleteOutlined /></template>
+                    </a-button>
+                  </a-tooltip>
                 </a-space>
               </template>
             </template>
@@ -416,7 +384,7 @@ onBeforeUnmount(() => {
               :page-size="completedList.pageSize"
               :total="completedList.total"
               simple
-              @change="loadCompleted"
+              @change="downloads.loadCompleted"
             />
           </div>
         </a-tab-pane>

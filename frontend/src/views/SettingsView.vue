@@ -1,21 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 
 import {
-  getDependencies,
   getSettings,
   installMissingDependencies,
   updateSettings,
   type DependenciesDTO,
   type SettingsDTO,
 } from '@/api/client'
+import { useDepsStore } from '@/stores/deps'
+
+const deps = useDepsStore()
 
 const loading = ref(false)
 const saving = ref(false)
-const loadingDeps = ref(false)
 const installingDeps = ref(false)
-const dependencies = ref<DependenciesDTO | null>(null)
 const form = reactive<SettingsDTO>({
   bindHost: '0.0.0.0',
   port: 12225,
@@ -24,16 +24,6 @@ const form = reactive<SettingsDTO>({
   ytDlpPath: '',
   ffmpegPath: '',
   accessPassword: '',
-})
-
-const dependencyItems = computed(() => {
-  if (!dependencies.value) {
-    return []
-  }
-  return [
-    { key: 'yt-dlp', label: 'yt-dlp.exe', value: dependencies.value.ytDlp },
-    { key: 'ffmpeg', label: 'ffmpeg.exe', value: dependencies.value.ffmpeg },
-  ]
 })
 
 async function load() {
@@ -45,27 +35,6 @@ async function load() {
     message.error(error instanceof Error ? error.message : '加载设置失败')
   } finally {
     loading.value = false
-  }
-
-  try {
-    await refreshDependencies(false)
-  } catch {
-    message.error('加载依赖状态失败')
-  }
-}
-
-async function refreshDependencies(showError = true) {
-  loadingDeps.value = true
-  try {
-    dependencies.value = await getDependencies()
-    return dependencies.value
-  } catch (error) {
-    if (showError) {
-      message.error(error instanceof Error ? error.message : '加载依赖状态失败')
-    }
-    throw error
-  } finally {
-    loadingDeps.value = false
   }
 }
 
@@ -123,9 +92,8 @@ async function installDependencies() {
   installingDeps.value = true
   try {
     const result = await installMissingDependencies()
-    dependencies.value = result
     summarizeInstallResult(result)
-    await refreshDependencies(false)
+    await deps.check()
   } catch (error) {
     message.error(error instanceof Error ? error.message : '下载依赖失败')
   } finally {
@@ -195,19 +163,19 @@ onMounted(load)
           <div class="field-hint">仅会下载到默认目录，不会修改上方自定义路径配置。</div>
         </div>
         <a-space>
-          <a-button :loading="loadingDeps" @click="refreshDependencies()">刷新状态</a-button>
+          <a-button :loading="deps.loading" @click="deps.check()">刷新状态</a-button>
           <a-button type="primary" :loading="installingDeps" @click="installDependencies">
             下载缺失依赖
           </a-button>
         </a-space>
       </div>
 
-      <div v-if="dependencies" class="deps-summary">
-        默认目录：{{ dependencies.binDir }}
+      <div v-if="deps.dependencies" class="deps-summary">
+        默认目录：{{ deps.dependencies.binDir }}
       </div>
 
       <div class="deps-list">
-        <div v-for="item in dependencyItems" :key="item.key" class="deps-item">
+        <div v-for="item in deps.items" :key="item.key" class="deps-item">
           <div class="deps-main">
             <div class="deps-name">{{ item.label }}</div>
             <a-tag :color="item.value.exists ? 'success' : 'default'">

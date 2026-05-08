@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { DownloadOutlined, LogoutOutlined, MenuOutlined, SettingOutlined } from '@ant-design/icons-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 
+import { useDepsStore } from '@/stores/deps'
+import { useDownloadsStore } from '@/stores/downloads'
 import { useSessionStore } from '@/stores/session'
+
+const downloads = useDownloadsStore()
+const deps = useDepsStore()
 
 const route = useRoute()
 const router = useRouter()
@@ -25,6 +30,7 @@ const updateViewport = () => {
 
 const logout = () => {
   navOpen.value = false
+  downloads.disconnect()
   session.logout()
   router.push({ name: 'login' })
 }
@@ -37,6 +43,19 @@ const goTo = (name: 'downloads' | 'settings') => {
 onMounted(() => {
   updateViewport()
   window.addEventListener('resize', updateViewport)
+  if (session.authenticated) {
+    downloads.connect()
+    if (!deps.initialized) deps.check()
+  }
+})
+
+watch(() => session.authenticated, (val) => {
+  if (val) {
+    downloads.connect()
+    if (!deps.initialized) deps.check()
+  } else {
+    downloads.disconnect()
+  }
 })
 
 onBeforeUnmount(() => {
