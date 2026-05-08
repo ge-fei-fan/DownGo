@@ -1,0 +1,16 @@
+.gocache/
+.gomodcache/
+frontend/node_modules/
+
+data/app.db
+data/app.db-shm
+data/app.db-wal
+data/logs/
+data/bin/
+
+dist/
+web/assets/
+webui/dist/
+
+DownGo.exe
+DownGo.exe~
