@@ -31,11 +31,20 @@ const (
 )
 
 type Runner interface {
-	Inspect(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error)
+	Inspect(ctx context.Context, settings config.Settings, url string) ([]domain.InspectResult, error)
 	Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error
 }
 
 type YTDLPRunner struct{}
+
+type PlatformRunner struct {
+	YouTube  Runner
+	Bilibili Runner
+}
+
+func NewPlatformRunner() *PlatformRunner {
+	return &PlatformRunner{YouTube: &YTDLPRunner{}, Bilibili: &BilibiliRunner{}}
+}
 
 type inspectJSON struct {
 	ID             string `json:"id"`
@@ -53,7 +62,33 @@ type streamLine struct {
 	text   string
 }
 
-func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error) {
+func (r *PlatformRunner) Inspect(ctx context.Context, settings config.Settings, rawURL string) ([]domain.InspectResult, error) {
+	source, err := normalizeSourceURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	switch source.Platform {
+	case domain.PlatformYouTube:
+		return r.YouTube.Inspect(ctx, settings, source.URL)
+	case domain.PlatformBilibili:
+		return r.Bilibili.Inspect(ctx, settings, source.URL)
+	default:
+		return nil, errors.New(unsupportedURLMessage)
+	}
+}
+
+func (r *PlatformRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {
+	switch item.Platform {
+	case domain.PlatformYouTube:
+		return r.YouTube.Download(ctx, settings, item, onStart, onProgress)
+	case domain.PlatformBilibili:
+		return r.Bilibili.Download(ctx, settings, item, onStart, onProgress)
+	default:
+		return errors.New(unsupportedURLMessage)
+	}
+}
+
+func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url string) ([]domain.InspectResult, error) {
 	args := []string{
 		"--dump-single-json",
 		"--no-playlist",
@@ -74,15 +109,15 @@ func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url
 		if msg == "" {
 			msg = err.Error()
 		}
-		return domain.InspectResult{}, errors.New(msg)
+		return nil, errors.New(msg)
 	}
 
 	var parsed inspectJSON
 	if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
-		return domain.InspectResult{}, err
+		return nil, err
 	}
 	if parsed.ID == "" {
-		return domain.InspectResult{}, errors.New("yt-dlp returned empty video id")
+		return nil, errors.New("yt-dlp returned empty video id")
 	}
 
 	title := strings.TrimSpace(parsed.Title)
@@ -91,7 +126,8 @@ func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url
 	}
 	qualityLabel := qualityLabelFromInspect(parsed.Height, parsed.Resolution)
 
-	return domain.InspectResult{
+	return []domain.InspectResult{{
+		Platform:           domain.PlatformYouTube,
 		NormalizedURL:      fmt.Sprintf("https://www.youtube.com/watch?v=%s", parsed.ID),
 		VideoID:            parsed.ID,
 		Title:              title,
@@ -101,7 +137,7 @@ func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url
 		DurationSeconds:    parsed.Duration,
 		EstimatedSizeBytes: parsed.FilesizeApprox,
 		SuggestedFilename:  safeOutputFilename(title, parsed.ID),
-	}, nil
+	}}, nil
 }
 
 func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {

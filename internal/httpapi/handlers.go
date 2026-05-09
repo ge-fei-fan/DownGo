@@ -7,22 +7,28 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
 	"example.com/downgo/internal/auth"
+	"example.com/downgo/internal/bilibili"
 	"example.com/downgo/internal/config"
 	"example.com/downgo/internal/db"
 	"example.com/downgo/internal/deps"
 	"example.com/downgo/internal/domain"
 	"example.com/downgo/internal/download"
+	"example.com/downgo/internal/util"
 )
 
 type API struct {
+	baseDir  string
 	settings *config.Service
 	manager  *download.Manager
 	deps     *deps.Service
@@ -41,6 +47,10 @@ type createRequest struct {
 	URL string `json:"url"`
 }
 
+type selectDownloadDirRequest struct {
+	CurrentDir string `json:"currentDir"`
+}
+
 type jsonResponse map[string]any
 
 func NewRouter(api *API, assets embed.FS) http.Handler {
@@ -53,8 +63,17 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 		protected.Use(api.authMiddleware)
 		protected.Get("/api/settings", api.handleGetSettings)
 		protected.Put("/api/settings", api.handlePutSettings)
+		protected.Post("/api/settings/download-dir/select", api.handleSelectDownloadDir)
+		protected.Post("/api/bilibili/qrcode", api.handleBilibiliQRCode)
+		protected.Get("/api/bilibili/qrcode/poll", api.handleBilibiliQRCodePoll)
+		protected.Get("/api/bilibili/session", api.handleBilibiliSession)
+		protected.Post("/api/bilibili/session/check", api.handleCheckBilibiliSession)
+		protected.Get("/api/bilibili/avatar", api.handleBilibiliAvatar)
+		protected.Delete("/api/bilibili/session", api.handleClearBilibiliSession)
 		protected.Get("/api/tools/dependencies", api.handleGetDependencies)
 		protected.Post("/api/tools/dependencies/install", api.handleInstallDependencies)
+		protected.Get("/api/tools/dependencies/install/status", api.handleInstallDependenciesStatus)
+		protected.Get("/api/tools/dependencies/install/events", api.handleInstallDependenciesEvents)
 		protected.Post("/api/downloads/inspect", api.handleInspect)
 		protected.Post("/api/downloads", api.handleCreate)
 		protected.Get("/api/downloads", api.handleList)
@@ -92,8 +111,8 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	return r
 }
 
-func NewAPI(settings *config.Service, manager *download.Manager, depsService *deps.Service, tokens *auth.TokenManager) *API {
-	return &API{settings: settings, manager: manager, deps: depsService, tokens: tokens}
+func NewAPI(baseDir string, settings *config.Service, manager *download.Manager, depsService *deps.Service, tokens *auth.TokenManager) *API {
+	return &API{baseDir: baseDir, settings: settings, manager: manager, deps: depsService, tokens: tokens}
 }
 
 func (api *API) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -138,12 +157,267 @@ func (api *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settings)
 }
 
+func (api *API) handleSelectDownloadDir(w http.ResponseWriter, r *http.Request) {
+	var req selectDownloadDirRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		zap.L().Warn("select download directory request decode failed", zap.Error(err))
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "请求体格式不正确"})
+		return
+	}
+
+	zap.L().Info("select download directory requested", zap.String("currentDir", req.CurrentDir), zap.String("remoteAddr", r.RemoteAddr))
+	selected, err := util.SelectFolder(req.CurrentDir)
+	if err != nil {
+		zap.L().Error("select download directory failed", zap.String("currentDir", req.CurrentDir), zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	if selected == "" {
+		zap.L().Info("select download directory canceled", zap.String("currentDir", req.CurrentDir))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	zap.L().Info("select download directory completed", zap.String("selectedDir", selected))
+	writeJSON(w, http.StatusOK, jsonResponse{"path": selected})
+}
+
+func (api *API) handleBilibiliQRCode(w http.ResponseWriter, r *http.Request) {
+	qr, err := bilibili.NewClient(nil).GenerateQRCode(r.Context())
+	if err != nil {
+		zap.L().Error("generate bilibili qrcode failed", zap.Error(err))
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, qr)
+}
+
+func (api *API) handleBilibiliQRCodePoll(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	result, err := bilibili.NewClient(nil).PollQRCode(r.Context(), key)
+	if err != nil {
+		zap.L().Error("poll bilibili qrcode failed", zap.Error(err))
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+
+	response := jsonResponse{
+		"code":    result.Code,
+		"message": result.Message,
+	}
+	if result.Code == 0 && result.Profile != nil {
+		faceLocal, avatarErr := api.downloadBilibiliAvatar(r, bilibili.NewClient(nil), result.Profile.Face)
+		if avatarErr != nil {
+			zap.L().Warn("bilibili avatar download failed", zap.String("face", result.Profile.Face), zap.Error(avatarErr))
+		}
+		session, err := api.settings.SetBilibiliSession(
+			result.Tokens.Sessdata,
+			result.Tokens.BiliJct,
+			result.Profile.Mid,
+			result.Profile.Uname,
+			result.Profile.Face,
+			faceLocal,
+			result.LoginAt,
+		)
+		if err != nil {
+			zap.L().Error("save bilibili session failed", zap.Error(err))
+			writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+			return
+		}
+		response["session"] = session
+		zap.L().Info("bilibili login saved", zap.Int("mid", session.Mid), zap.String("uname", session.Uname))
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (api *API) handleBilibiliSession(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, api.settings.BilibiliSession())
+}
+
+func (api *API) handleCheckBilibiliSession(w http.ResponseWriter, r *http.Request) {
+	sessdata, _, ok := api.settings.BilibiliCredentials()
+	if !ok {
+		session := api.settings.BilibiliSession()
+		session.Status = "missing"
+		session.Message = "未保存 Bilibili 登录凭据"
+		writeJSON(w, http.StatusOK, session)
+		return
+	}
+
+	checkedAt := time.Now().UTC()
+	biliClient := bilibili.NewClient(nil)
+	profile, err := biliClient.CheckLogin(r.Context(), sessdata)
+	if err != nil {
+		status := "error"
+		message := "检查失败：网络异常或 Bilibili 接口不可用"
+		if errors.Is(err, bilibili.ErrNotLoggedIn) {
+			status = "invalid"
+			message = "Bilibili 登录已失效，请重新扫码登录"
+		}
+		session, saveErr := api.settings.UpdateBilibiliCheck(status, message, 0, "", "", "", checkedAt)
+		if saveErr != nil {
+			writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": saveErr.Error()})
+			return
+		}
+		zap.L().Warn("bilibili session check failed", zap.String("status", status), zap.Error(err))
+		writeJSON(w, http.StatusOK, session)
+		return
+	}
+
+	spaceInfo, err := biliClient.GetSpaceInfo(r.Context(), sessdata, profile.Mid)
+	if err != nil {
+		message := "Bilibili 登录有效，但获取空间信息失败：" + err.Error()
+		faceLocal, avatarErr := api.downloadBilibiliAvatar(r, biliClient, profile.Face)
+		if avatarErr != nil {
+			zap.L().Warn("bilibili avatar download failed", zap.String("face", profile.Face), zap.Error(avatarErr))
+		}
+		session, saveErr := api.settings.UpdateBilibiliCheck("valid", message, profile.Mid, profile.Uname, profile.Face, faceLocal, checkedAt)
+		if saveErr != nil {
+			writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": saveErr.Error()})
+			return
+		}
+		zap.L().Warn("bilibili space info fetch failed", zap.Int("mid", profile.Mid), zap.Error(err))
+		writeJSON(w, http.StatusOK, session)
+		return
+	}
+
+	session, err := api.settings.UpdateBilibiliProfileCheck(
+		"valid",
+		"Bilibili 登录有效，已更新空间资料",
+		spaceInfo.Mid,
+		spaceInfo.Name,
+		spaceInfo.Face,
+		api.mustDownloadBilibiliAvatar(r, biliClient, spaceInfo.Face),
+		spaceInfo.Level,
+		spaceInfo.Sex,
+		spaceInfo.Sign,
+		spaceInfo.Vip.Status,
+		spaceInfo.Vip.Type,
+		spaceInfo.Vip.Label.Text,
+		spaceInfo.Vip.DueDate,
+		spaceInfo.SeniorMember == 1,
+		checkedAt,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	zap.L().Info("bilibili session check succeeded", zap.Int("mid", spaceInfo.Mid), zap.String("uname", spaceInfo.Name))
+	writeJSON(w, http.StatusOK, session)
+}
+
+func (api *API) handleClearBilibiliSession(w http.ResponseWriter, r *http.Request) {
+	_ = os.Remove(api.bilibiliAvatarPath())
+	if err := api.settings.ClearBilibiliSession(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (api *API) handleBilibiliAvatar(w http.ResponseWriter, r *http.Request) {
+	avatarPath := api.bilibiliAvatarPath()
+	if _, err := os.Stat(avatarPath); err != nil {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "Bilibili 本地头像不存在，请先检查登录状态"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeFile(w, r, avatarPath)
+}
+
+func (api *API) downloadBilibiliAvatar(r *http.Request, client *bilibili.Client, face string) (string, error) {
+	if face == "" {
+		return "", nil
+	}
+	if err := client.DownloadAvatar(r.Context(), face, api.bilibiliAvatarPath()); err != nil {
+		return "", err
+	}
+	return "/api/bilibili/avatar", nil
+}
+
+func (api *API) mustDownloadBilibiliAvatar(r *http.Request, client *bilibili.Client, face string) string {
+	faceLocal, err := api.downloadBilibiliAvatar(r, client, face)
+	if err != nil {
+		zap.L().Warn("bilibili avatar download failed", zap.String("face", face), zap.Error(err))
+		return ""
+	}
+	return faceLocal
+}
+
+func (api *API) bilibiliAvatarPath() string {
+	return filepath.Join(api.baseDir, "data", "bilibili", "avatar")
+}
+
 func (api *API) handleGetDependencies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.deps.Status())
 }
 
 func (api *API) handleInstallDependencies(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, api.deps.InstallMissing(r.Context()))
+	writeJSON(w, http.StatusOK, api.deps.StartInstall())
+}
+
+func (api *API) handleInstallDependenciesStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, api.deps.InstallSnapshot())
+}
+
+func (api *API) handleInstallDependenciesEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "当前服务器不支持实时进度"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	zap.L().Info("dependency install event stream started", zap.String("remoteAddr", r.RemoteAddr))
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	snapshot, ch, unsubscribe := api.deps.SubscribeInstall()
+	defer unsubscribe()
+	for _, event := range snapshot.Events {
+		if !writeDependencyInstallEvent(w, flusher, event) {
+			return
+		}
+	}
+	if !snapshot.Installing {
+		zap.L().Info("dependency install event stream completed without active install", zap.String("remoteAddr", r.RemoteAddr))
+		return
+	}
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			if !writeDependencyInstallEvent(w, flusher, event) {
+				return
+			}
+			if event.Type == "done" {
+				zap.L().Info("dependency install event stream completed", zap.String("remoteAddr", r.RemoteAddr))
+				return
+			}
+		}
+	}
+}
+
+func writeDependencyInstallEvent(w http.ResponseWriter, flusher http.Flusher, event deps.ProgressEvent) bool {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		zap.L().Error("marshal dependency install event failed", zap.Error(err))
+		return true
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+		zap.L().Error("write dependency install event failed", zap.Error(err))
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 func (api *API) handleInspect(w http.ResponseWriter, r *http.Request) {
@@ -253,10 +527,14 @@ func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) handleOpenPath(w http.ResponseWriter, r *http.Request) {
-	if err := api.manager.OpenPath(routeID(r)); err != nil {
+	id := routeID(r)
+	zap.L().Info("open download path requested", zap.Int64("id", id), zap.String("remoteAddr", r.RemoteAddr))
+	if err := api.manager.OpenPath(id); err != nil {
+		zap.L().Error("open download path failed", zap.Int64("id", id), zap.Error(err))
 		writeError(w, err)
 		return
 	}
+	zap.L().Info("open download path completed", zap.Int64("id", id))
 	w.WriteHeader(http.StatusNoContent)
 }
 

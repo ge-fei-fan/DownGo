@@ -66,7 +66,7 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 		}
 	}
 
-	manager, err := download.NewManager(store, settingsService, &download.YTDLPRunner{})
+	manager, err := download.NewManager(store, settingsService, download.NewPlatformRunner())
 	if err != nil {
 		_ = store.Close()
 		return nil, err
@@ -74,7 +74,7 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 
 	depsService := deps.NewService(baseDir, nil)
 	tokens := auth.NewTokenManager(baseDir + "|downgo")
-	api := httpapi.NewAPI(settingsService, manager, depsService, tokens)
+	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, tokens)
 	router := httpapi.NewRouter(api, webui.Assets)
 	appCtx, appCancel := context.WithCancel(context.Background())
 

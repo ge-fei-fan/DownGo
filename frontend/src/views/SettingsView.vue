@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 
 import {
+  bilibiliAvatarURL,
+  checkBilibiliSession,
+  clearBilibiliSession,
+  createBilibiliQRCode,
+  getBilibiliSession,
   getSettings,
-  installMissingDependencies,
+  pollBilibiliQRCode,
+  selectDownloadDir,
   updateSettings,
-  type DependenciesDTO,
+  type BilibiliSessionDTO,
+  type DependencyInstallEvent,
   type SettingsDTO,
 } from '@/api/client'
 import { useDepsStore } from '@/stores/deps'
@@ -15,7 +22,15 @@ const deps = useDepsStore()
 
 const loading = ref(false)
 const saving = ref(false)
-const installingDeps = ref(false)
+const selectingDir = ref(false)
+const biliLoading = ref(false)
+const biliChecking = ref(false)
+const biliDialogOpen = ref(false)
+const biliQrUrl = ref('')
+const biliQrKey = ref('')
+const biliQrStatusCode = ref(1)
+const biliSession = ref<BilibiliSessionDTO | null>(null)
+let biliPollTimer: number | undefined
 const form = reactive<SettingsDTO>({
   bindHost: '0.0.0.0',
   port: 12225,
@@ -23,14 +38,21 @@ const form = reactive<SettingsDTO>({
   concurrentDownloads: 2,
   ytDlpPath: '',
   ffmpegPath: '',
+  bilibiliMid: 0,
+  bilibiliUname: '',
+  bilibiliFace: '',
+  bilibiliLoginAt: '',
   accessPassword: '',
 })
+
+const biliLoggedIn = computed(() => Boolean(biliSession.value?.loggedIn))
 
 async function load() {
   loading.value = true
   try {
     const settings = await getSettings()
     Object.assign(form, settings, { accessPassword: '' })
+    await loadBilibiliSession()
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载设置失败')
   } finally {
@@ -51,57 +73,234 @@ async function save() {
   }
 }
 
-function summarizeInstallResult(result: DependenciesDTO) {
-  const downloaded: string[] = []
-  const failed: string[] = []
-  const alreadyInstalled: string[] = []
-
-  const items = [
-    ['yt-dlp.exe', result.ytDlp],
-    ['ffmpeg.exe', result.ffmpeg],
-  ] as const
-
-  for (const [name, item] of items) {
-    if (item.downloaded) {
-      downloaded.push(name)
-      continue
-    }
-    if (item.error) {
-      failed.push(`${name}：${item.error}`)
-      continue
-    }
-    if (item.exists) {
-      alreadyInstalled.push(name)
-    }
-  }
-
-  if (failed.length > 0) {
-    message.error(failed.join('；'))
-    return
-  }
-  if (downloaded.length === 0) {
-    message.success('依赖已安装，无需下载')
-    return
-  }
-
-  const suffix = alreadyInstalled.length > 0 ? `；已跳过 ${alreadyInstalled.join('、')}` : ''
-  message.success(`已下载 ${downloaded.join('、')}${suffix}`)
+async function loadBilibiliSession() {
+  biliSession.value = await getBilibiliSession()
 }
 
-async function installDependencies() {
-  installingDeps.value = true
+async function chooseDownloadDir() {
+  selectingDir.value = true
   try {
-    const result = await installMissingDependencies()
-    summarizeInstallResult(result)
-    await deps.check()
+    const selected = await selectDownloadDir(form.downloadDir)
+    if (selected?.path) {
+      form.downloadDir = selected.path
+    }
   } catch (error) {
-    message.error(error instanceof Error ? error.message : '下载依赖失败')
+    message.error(error instanceof Error ? error.message : '选择目录失败')
   } finally {
-    installingDeps.value = false
+    selectingDir.value = false
   }
+}
+
+function installDependencies() {
+  deps.installMissing()
+}
+
+async function startBilibiliLogin() {
+  stopBilibiliPolling()
+  biliLoading.value = true
+  biliQrStatusCode.value = 1
+  try {
+    const qr = await createBilibiliQRCode()
+    biliQrUrl.value = qr.url
+    biliQrKey.value = qr.qrcodeKey
+    biliDialogOpen.value = true
+    biliQrStatusCode.value = 86101
+    biliPollTimer = window.setInterval(pollBilibiliLogin, 1000)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '获取 Bilibili 登录二维码失败')
+  } finally {
+    biliLoading.value = false
+  }
+}
+
+async function pollBilibiliLogin() {
+  if (!biliQrKey.value) return
+  try {
+    const result = await pollBilibiliQRCode(biliQrKey.value)
+    biliQrStatusCode.value = result.code
+    if (result.code === 0) {
+      stopBilibiliPolling()
+      if (result.session) {
+        biliSession.value = result.session
+      } else {
+        await loadBilibiliSession()
+      }
+      message.success('Bilibili 登录成功，已保存凭据')
+      biliDialogOpen.value = false
+      return
+    }
+    if (result.code === 86038) {
+      stopBilibiliPolling()
+    }
+  } catch (error) {
+    stopBilibiliPolling()
+    message.error(error instanceof Error ? error.message : '轮询 Bilibili 登录状态失败')
+  }
+}
+
+async function clearBilibiliLogin() {
+  try {
+    await clearBilibiliSession()
+    biliSession.value = { loggedIn: false, mid: 0, uname: '', face: '', faceLocal: '', loginAt: '', status: 'missing', checkedAt: '', message: '', level: 0, sex: '', sign: '', vipStatus: 0, vipType: 0, vipLabel: '', vipDueDate: 0, seniorMember: false }
+    message.success('已清除 Bilibili 登录凭据')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '清除 Bilibili 登录失败')
+  }
+}
+
+async function checkBilibiliLogin() {
+  biliChecking.value = true
+  try {
+    biliSession.value = await checkBilibiliSession()
+    if (biliSession.value.status === 'valid') {
+      message.success(biliSession.value.message || 'Bilibili 登录有效')
+    } else if (biliSession.value.status === 'invalid') {
+      message.warning(biliSession.value.message || 'Bilibili 登录已失效，请重新登录')
+    } else if (biliSession.value.status === 'error') {
+      message.warning(`${biliSession.value.message || '检测失败，请稍后重试'}。不会自动清除已保存凭据，可稍后重试。`)
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '检查 Bilibili 登录状态失败')
+  } finally {
+    biliChecking.value = false
+  }
+}
+
+function closeBilibiliDialog() {
+  biliDialogOpen.value = false
+  stopBilibiliPolling()
+}
+
+function stopBilibiliPolling() {
+  if (biliPollTimer !== undefined) {
+    window.clearInterval(biliPollTimer)
+    biliPollTimer = undefined
+  }
+}
+
+function biliQrStatus() {
+  switch (biliQrStatusCode.value) {
+    case 86090:
+      return 'scanned'
+    case 86038:
+      return 'expired'
+    case 0:
+      return 'success'
+    case 1:
+      return 'loading'
+    default:
+      return undefined
+  }
+}
+
+function biliQrStatusText() {
+  switch (biliQrStatusCode.value) {
+    case 86101:
+      return '等待扫码'
+    case 86090:
+      return '已扫码，请在手机端确认'
+    case 86038:
+      return '二维码已过期，请重新获取'
+    case 0:
+      return '登录成功'
+    default:
+      return '正在获取登录状态'
+  }
+}
+
+function formatBiliLoginAt(value?: string) {
+  if (!value) return '-'
+  return new Date(value).toLocaleString()
+}
+
+function formatBiliVipDueDate(value?: number) {
+  if (!value || value <= 0) return '-'
+  return new Date(value).toLocaleString()
+}
+
+function biliVipText() {
+  if (!biliSession.value || biliSession.value.vipStatus !== 1) return '未开通大会员'
+  return biliSession.value.vipLabel || '大会员'
+}
+
+function localBiliAvatarURL() {
+  return bilibiliAvatarURL(biliSession.value)
+}
+
+function biliStatusText() {
+  switch (biliSession.value?.status) {
+    case 'valid':
+      return '登录有效'
+    case 'invalid':
+      return '登录已失效'
+    case 'error':
+      return '检查失败'
+    case 'unchecked':
+      return '未检查'
+    default:
+      return '未登录'
+  }
+}
+
+function biliStatusColor() {
+  switch (biliSession.value?.status) {
+    case 'valid':
+      return 'success'
+    case 'invalid':
+      return 'error'
+    case 'error':
+      return 'warning'
+    case 'unchecked':
+      return 'processing'
+    default:
+      return 'default'
+  }
+}
+
+function dependencyEvent(name: string) {
+  return deps.installEvents[name]
+}
+
+function dependencyProgress(event?: DependencyInstallEvent) {
+  if (!event?.percent || event.percent < 0) return 0
+  return Math.min(100, Math.round(event.percent))
+}
+
+function dependencyStatus(item: { label: string; value: { exists: boolean } }) {
+  const event = dependencyEvent(item.label)
+  if (!event) return item.value.exists ? '已安装' : '未安装'
+  switch (event.type) {
+    case 'started':
+      return '准备下载'
+    case 'progress':
+      return event.totalBytes && event.totalBytes > 0 ? `下载中 ${dependencyProgress(event)}%` : '下载中'
+    case 'skipped':
+      return '已跳过'
+    case 'completed':
+      return '已下载'
+    case 'failed':
+      return '下载失败'
+    default:
+      return item.value.exists ? '已安装' : '未安装'
+  }
+}
+
+function dependencyTagColor(item: { label: string; value: { exists: boolean } }) {
+  const event = dependencyEvent(item.label)
+  if (event?.type === 'failed') return 'error'
+  if (event?.type === 'progress' || event?.type === 'started') return 'processing'
+  if (event?.type === 'completed' || item.value.exists) return 'success'
+  return 'default'
+}
+
+function formatBytes(value?: number) {
+  if (!value || value <= 0) return '-'
+  const mib = value / 1024 / 1024
+  return `${mib.toFixed(1)} MiB`
 }
 
 onMounted(load)
+onBeforeUnmount(stopBilibiliPolling)
 </script>
 
 <template>
@@ -130,7 +329,10 @@ onMounted(load)
       </a-row>
 
       <a-form-item label="下载目录">
-        <a-input v-model:value="form.downloadDir" />
+        <a-input-group compact class="download-dir-control">
+          <a-input v-model:value="form.downloadDir" placeholder="选择或输入下载目录" />
+          <a-button :loading="selectingDir" @click="chooseDownloadDir">选择目录</a-button>
+        </a-input-group>
       </a-form-item>
 
       <a-row :gutter="16">
@@ -141,14 +343,6 @@ onMounted(load)
         </a-col>
       </a-row>
 
-      <a-form-item label="yt-dlp.exe 路径">
-        <a-input v-model:value="form.ytDlpPath" />
-      </a-form-item>
-
-      <a-form-item label="ffmpeg.exe 路径">
-        <a-input v-model:value="form.ffmpegPath" />
-      </a-form-item>
-
       <a-form-item label="新的共享密码">
         <a-input-password v-model:value="form.accessPassword" placeholder="留空则保持当前密码不变" />
       </a-form-item>
@@ -156,15 +350,58 @@ onMounted(load)
 
     <a-divider />
 
+    <div class="bili-section">
+      <div class="deps-header">
+        <div>
+          <h2>Bilibili 登录</h2>
+          <div class="field-hint">扫码登录后会保存 Bilibili 登录凭据，当前仅用于保存登录状态展示。</div>
+        </div>
+        <a-space>
+          <a-button v-if="biliLoggedIn" :loading="biliChecking" @click="checkBilibiliLogin">检查登录状态</a-button>
+          <a-button :loading="biliLoading" @click="startBilibiliLogin">
+            {{ biliLoggedIn ? '重新登录' : '扫码登录' }}
+          </a-button>
+          <a-button v-if="biliLoggedIn" danger @click="clearBilibiliLogin">清除登录</a-button>
+        </a-space>
+      </div>
+
+      <div class="bili-card">
+        <a-avatar v-if="biliLoggedIn && localBiliAvatarURL()" :size="56" :src="localBiliAvatarURL()" />
+        <a-avatar v-else :size="56">B</a-avatar>
+        <div class="bili-info">
+          <div class="bili-title">
+            <span>{{ biliLoggedIn ? '已登录' : '未登录' }}</span>
+            <a-tag :color="biliLoggedIn ? 'success' : 'default'">
+              {{ biliLoggedIn ? '已保存凭据' : '未保存凭据' }}
+            </a-tag>
+            <a-tag :color="biliStatusColor()">{{ biliStatusText() }}</a-tag>
+          </div>
+          <div v-if="biliLoggedIn" class="bili-meta">
+            昵称：{{ biliSession?.uname || '-' }} · MID：{{ biliSession?.mid || '-' }} · LV{{ biliSession?.level || 0 }}
+          </div>
+          <div v-if="biliLoggedIn" class="bili-meta">
+            会员：{{ biliVipText() }} · 到期：{{ formatBiliVipDueDate(biliSession?.vipDueDate) }} · 硬核会员：{{ biliSession?.seniorMember ? '是' : '否' }}
+          </div>
+          <div v-if="biliLoggedIn" class="bili-meta">
+            性别：{{ biliSession?.sex || '-' }} · 登录时间：{{ formatBiliLoginAt(biliSession?.loginAt) }} · 上次检查：{{ formatBiliLoginAt(biliSession?.checkedAt) }}
+          </div>
+          <div v-if="biliLoggedIn && biliSession?.sign" class="bili-sign">{{ biliSession.sign }}</div>
+          <div v-if="!biliLoggedIn" class="field-hint">点击“扫码登录”后使用 Bilibili 手机客户端扫码确认。</div>
+        </div>
+      </div>
+    </div>
+
+    <a-divider />
+
     <div class="deps-section">
       <div class="deps-header">
         <div>
           <h2>依赖工具</h2>
-          <div class="field-hint">仅会下载到默认目录，不会修改上方自定义路径配置。</div>
+          <div class="field-hint">路径固定为 exe 同级 data 目录，无需手动配置。</div>
         </div>
         <a-space>
           <a-button :loading="deps.loading" @click="deps.check()">刷新状态</a-button>
-          <a-button type="primary" :loading="installingDeps" @click="installDependencies">
+          <a-button type="primary" :loading="deps.installing" @click="installDependencies">
             下载缺失依赖
           </a-button>
         </a-space>
@@ -178,16 +415,35 @@ onMounted(load)
         <div v-for="item in deps.items" :key="item.key" class="deps-item">
           <div class="deps-main">
             <div class="deps-name">{{ item.label }}</div>
-            <a-tag :color="item.value.exists ? 'success' : 'default'">
-              {{ item.value.exists ? '已安装' : '未安装' }}
+            <a-tag :color="dependencyTagColor(item)">
+              {{ dependencyStatus(item) }}
             </a-tag>
           </div>
           <div class="deps-path">{{ item.value.path }}</div>
+          <div v-if="dependencyEvent(item.label)?.type === 'progress'" class="deps-progress">
+            <a-progress
+              :percent="dependencyProgress(dependencyEvent(item.label))"
+              :status="dependencyEvent(item.label)?.error ? 'exception' : 'active'"
+              :show-info="Boolean(dependencyEvent(item.label)?.totalBytes)"
+            />
+            <div class="field-hint">
+              已下载 {{ formatBytes(dependencyEvent(item.label)?.bytes) }} / {{ formatBytes(dependencyEvent(item.label)?.totalBytes) }}
+            </div>
+          </div>
           <div v-if="item.value.error" class="deps-error">{{ item.value.error }}</div>
+          <div v-if="dependencyEvent(item.label)?.error" class="deps-error">{{ dependencyEvent(item.label)?.error }}</div>
         </div>
       </div>
     </div>
   </a-card>
+
+  <a-modal v-model:open="biliDialogOpen" title="Bilibili 扫码登录" :footer="null" @cancel="closeBilibiliDialog">
+    <div class="bili-qrcode-box">
+      <a-qrcode :value="biliQrUrl || 'loading'" :status="biliQrStatus()" />
+      <div class="bili-qrcode-status">{{ biliQrStatusText() }}</div>
+      <a-button v-if="biliQrStatusCode === 86038" type="primary" @click="startBilibiliLogin">重新获取二维码</a-button>
+    </div>
+  </a-modal>
 </template>
 
 <style scoped>
@@ -221,6 +477,66 @@ h1 {
   gap: 16px;
 }
 
+.bili-section {
+  display: grid;
+  gap: 16px;
+}
+
+.bili-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid rgba(22, 32, 51, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.bili-info {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bili-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+
+.bili-meta {
+  color: #58708f;
+  word-break: break-all;
+}
+
+.bili-sign {
+  color: #6f89a4;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.bili-qrcode-box {
+  display: grid;
+  place-items: center;
+  gap: 14px;
+  padding: 12px 0;
+}
+
+.bili-qrcode-status {
+  color: #58708f;
+}
+
+.download-dir-control {
+  display: flex;
+}
+
+.download-dir-control :deep(.ant-input) {
+  flex: 1;
+  min-width: 0;
+}
+
 .deps-header {
   display: flex;
   justify-content: space-between;
@@ -233,9 +549,16 @@ h1 {
 }
 
 .deps-summary,
-.field-hint {
+.field-hint,
+.field-readonly {
   color: #6f89a4;
   font-size: 12px;
+}
+
+.field-readonly {
+  font-family: monospace;
+  word-break: break-all;
+  padding: 4px 0;
 }
 
 .deps-list {
@@ -264,6 +587,12 @@ h1 {
   margin-top: 6px;
   color: #58708f;
   word-break: break-all;
+}
+
+.deps-progress {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
 }
 
 .deps-error {

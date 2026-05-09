@@ -148,6 +148,15 @@ func (s *Store) FindByVideoID(videoID string) ([]domain.DownloadItem, error) {
 	return scanDownloads(rows)
 }
 
+func (s *Store) FindByPlatformVideoID(platform string, videoID string) ([]domain.DownloadItem, error) {
+	rows, err := s.db.Query(downloadSelectByPlatformVideoIDSQL, platform, videoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanDownloads(rows)
+}
+
 func (s *Store) UpdateProgress(id int64, status string, percent float64, speed float64, eta int64, pid int, errMsg string, qualityLabel string, container string, startedAt *time.Time, completedAt *time.Time) (domain.DownloadItem, error) {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`
@@ -299,6 +308,7 @@ error_message, process_pid, created_at, started_at, completed_at, updated_at, de
 
 const downloadSelectByIDSQL = `SELECT ` + downloadSelectColumns + ` FROM downloads WHERE id = ?`
 const downloadSelectByVideoIDSQL = `SELECT ` + downloadSelectColumns + ` FROM downloads WHERE deleted_at IS NULL AND video_id = ? ORDER BY created_at DESC`
+const downloadSelectByPlatformVideoIDSQL = `SELECT ` + downloadSelectColumns + ` FROM downloads WHERE deleted_at IS NULL AND platform = ? AND video_id = ? ORDER BY created_at DESC`
 
 type scanner interface {
 	Scan(dest ...any) error

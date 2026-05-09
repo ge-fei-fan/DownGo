@@ -31,6 +31,7 @@ const updateViewport = () => {
 const logout = () => {
   navOpen.value = false
   downloads.disconnect()
+  deps.disconnectInstall()
   session.logout()
   router.push({ name: 'login' })
 }
@@ -46,6 +47,7 @@ onMounted(() => {
   if (session.authenticated) {
     downloads.connect()
     if (!deps.initialized) deps.check()
+    deps.loadInstallStatus()
   }
 })
 
@@ -53,8 +55,10 @@ watch(() => session.authenticated, (val) => {
   if (val) {
     downloads.connect()
     if (!deps.initialized) deps.check()
+    deps.loadInstallStatus()
   } else {
     downloads.disconnect()
+    deps.disconnectInstall()
   }
 })
 

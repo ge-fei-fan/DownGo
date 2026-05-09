@@ -15,11 +15,11 @@ import (
 )
 
 type testRunner struct {
-	inspectFn  func(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error)
+	inspectFn  func(ctx context.Context, settings config.Settings, url string) ([]domain.InspectResult, error)
 	downloadFn func(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error
 }
 
-func (r *testRunner) Inspect(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error) {
+func (r *testRunner) Inspect(ctx context.Context, settings config.Settings, url string) ([]domain.InspectResult, error) {
 	return r.inspectFn(ctx, settings, url)
 }
 
@@ -36,10 +36,11 @@ func TestCreateReturnsResolvingPlaceholderBeforeInspectCompletes(t *testing.T) {
 	releaseInspect := make(chan struct{})
 	downloadStarted := make(chan struct{})
 	manager, cleanup := newTestManager(t, &testRunner{
-		inspectFn: func(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error) {
+		inspectFn: func(ctx context.Context, settings config.Settings, url string) ([]domain.InspectResult, error) {
 			select {
 			case <-releaseInspect:
-				return domain.InspectResult{
+				return []domain.InspectResult{{
+					Platform:          domain.PlatformYouTube,
 					NormalizedURL:     "https://www.youtube.com/watch?v=abc123",
 					VideoID:           "abc123",
 					Title:             "Test Video",
@@ -47,9 +48,9 @@ func TestCreateReturnsResolvingPlaceholderBeforeInspectCompletes(t *testing.T) {
 					QualityLabel:      "1080p",
 					Container:         "mp4",
 					SuggestedFilename: "Test Video [abc123].mp4",
-				}, nil
+				}}, nil
 			case <-ctx.Done():
-				return domain.InspectResult{}, ctx.Err()
+				return nil, ctx.Err()
 			}
 		},
 		downloadFn: func(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {
@@ -105,8 +106,8 @@ func TestCreateKeepsFailedRecordWhenInspectFails(t *testing.T) {
 	t.Parallel()
 
 	manager, cleanup := newTestManager(t, &testRunner{
-		inspectFn: func(ctx context.Context, settings config.Settings, url string) (domain.InspectResult, error) {
-			return domain.InspectResult{}, errors.New("inspect failed")
+		inspectFn: func(ctx context.Context, settings config.Settings, url string) ([]domain.InspectResult, error) {
+			return nil, errors.New("inspect failed")
 		},
 	})
 	defer cleanup()

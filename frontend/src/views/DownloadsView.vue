@@ -45,7 +45,7 @@ const connectionMessage = computed(() => downloads.connectionMessage)
 
 async function submitDownload() {
   if (!form.url.trim()) {
-    message.warning('请先粘贴 YouTube 视频或 Shorts 链接')
+    message.warning('请先粘贴 YouTube 或 Bilibili 视频链接')
     return
   }
 
@@ -55,7 +55,7 @@ async function submitDownload() {
     downloads.upsertLocal(item)
     activeTab.value = 'active'
     form.url = ''
-    message.success('下载任务已加入队列')
+    message.success('下载任务已加入队列；Bilibili 多 P 会自动展开为多个任务')
   } catch (error) {
     message.error(error instanceof Error ? error.message : '创建下载任务失败')
   } finally {
@@ -93,7 +93,7 @@ async function retryTask(item: DownloadItem) {
 async function openPath(item: DownloadItem) {
   try {
     await openDownloadPath(item.id)
-    message.success('已打开文件位置')
+    message.success('已打开所在目录')
   } catch (error) {
     message.error(error instanceof Error ? error.message : '打开文件路径失败')
   }
@@ -174,6 +174,21 @@ function displaySubtitle(item: DownloadItem) {
   return item.sourceUrl
 }
 
+function platformLabel(platform: string) {
+  switch (platform) {
+    case 'youtube':
+      return 'YouTube'
+    case 'bilibili':
+      return 'Bilibili'
+    default:
+      return platform || '-'
+  }
+}
+
+function platformColor(platform: string) {
+  return platform === 'bilibili' ? 'pink' : 'red'
+}
+
 function formatProgress(value: number) {
   if (!Number.isFinite(value) || value < 0) {
     return 0
@@ -220,21 +235,21 @@ onMounted(() => {
   <div class="page">
     <section class="hero">
       <div>
-        <div class="hero-kicker">YouTube / Shorts</div>
-        <h1>输入链接后立刻加入任务列表，后台自动解析并实时显示下载进度和速度。</h1>
+        <div class="hero-kicker">YouTube / Bilibili</div>
+        <h1></h1>
       </div>
       <a-card class="queue-card" :bordered="false">
         <a-space direction="vertical" style="width: 100%" size="middle">
           <a-input
             v-model:value="form.url"
             size="large"
-            placeholder="https://www.youtube.com/watch?v=..."
+            placeholder="https://www.youtube.com/watch?v=... 或 https://www.bilibili.com/video/BV..."
             @press-enter="submitDownload"
           />
           <a-button type="primary" size="large" :loading="loadingCreate" @click="submitDownload">
             加入下载队列
           </a-button>
-          <div class="queue-note">网络较慢时，任务会先显示“解析中”，稍后自动补齐视频信息并开始下载。</div>
+          <div class="queue-note">网络较慢时，任务会先显示“解析中”；Bilibili 多 P 链接会自动展开为多个下载任务。</div>
         </a-space>
       </a-card>
     </section>
@@ -262,7 +277,7 @@ onMounted(() => {
                   <a-image v-if="record.thumbnailUrl" :width="120" :src="record.thumbnailUrl" :preview="false" />
                   <div v-else class="thumb-placeholder">解析中</div>
                   <div>
-                    <div class="video-title">{{ displayTitle(record) }}</div>
+                    <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
                     <div class="muted">{{ displaySubtitle(record) }}</div>
                     <div v-if="record.errorMessage" class="error-copy">{{ record.errorMessage }}</div>
                   </div>
@@ -313,7 +328,7 @@ onMounted(() => {
                 <a-image v-if="record.thumbnailUrl" :width="96" :src="record.thumbnailUrl" :preview="false" />
                 <div v-else class="thumb-placeholder mobile-thumb">解析中</div>
                 <div class="mobile-copy">
-                  <div class="video-title">{{ displayTitle(record) }}</div>
+                  <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
                   <div class="muted">{{ displaySubtitle(record) }}</div>
                   <div class="mobile-status">{{ formatStatus(record.status) }}</div>
                 </div>
@@ -366,7 +381,7 @@ onMounted(() => {
                 <div class="video-cell">
                   <a-image v-if="record.thumbnailUrl" :width="120" :src="record.thumbnailUrl" :preview="false" />
                   <div v-else class="thumb-placeholder">视频</div>
-                  <div class="video-title">{{ displayTitle(record) }}</div>
+                  <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
                 </div>
               </template>
               <template v-else-if="column.key === 'quality'">
@@ -399,7 +414,7 @@ onMounted(() => {
                 <a-image v-if="record.thumbnailUrl" :width="96" :src="record.thumbnailUrl" :preview="false" />
                 <div v-else class="thumb-placeholder mobile-thumb">视频</div>
                 <div class="mobile-copy">
-                  <div class="video-title">{{ displayTitle(record) }}</div>
+                  <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
                   <div class="muted">完成时间：{{ formatDate(record.completedAt) }}</div>
                 </div>
               </div>

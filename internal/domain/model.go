@@ -3,7 +3,8 @@ package domain
 import "time"
 
 const (
-	PlatformYouTube = "youtube"
+	PlatformYouTube  = "youtube"
+	PlatformBilibili = "bilibili"
 
 	StatusResolving      = "resolving"
 	StatusQueued         = "queued"
@@ -40,6 +41,7 @@ type DownloadItem struct {
 }
 
 type InspectResult struct {
+	Platform           string        `json:"platform"`
 	NormalizedURL      string        `json:"normalizedUrl"`
 	VideoID            string        `json:"videoId"`
 	Title              string        `json:"title"`

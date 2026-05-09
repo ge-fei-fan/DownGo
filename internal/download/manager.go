@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"example.com/downgo/internal/config"
 	"example.com/downgo/internal/db"
 	"example.com/downgo/internal/domain"
@@ -71,37 +73,42 @@ func NewManager(store *db.Store, settings *config.Service, runner Runner) (*Mana
 	return m, nil
 }
 
-func (m *Manager) Inspect(ctx context.Context, url string) (domain.InspectResult, error) {
-	normalizedInput, err := normalizeYouTubeURL(url)
+func (m *Manager) Inspect(ctx context.Context, url string) ([]domain.InspectResult, error) {
+	source, err := normalizeSourceURL(url)
 	if err != nil {
-		return domain.InspectResult{}, err
+		return nil, err
 	}
 
 	settings := m.settings.Current()
-	if err := ensureBinaries(settings); err != nil {
-		return domain.InspectResult{}, err
+	if err := ensureBinariesForPlatform(settings, source.Platform); err != nil {
+		return nil, err
 	}
 
-	meta, err := m.runner.Inspect(ctx, settings, normalizedInput)
+	metas, err := m.runner.Inspect(ctx, settings, source.URL)
 	if err != nil {
-		return domain.InspectResult{}, err
+		return nil, err
 	}
-	duplicate, err := m.findBlockingDuplicate(meta.VideoID, 0)
-	if err != nil {
-		return domain.InspectResult{}, err
+	for i := range metas {
+		if metas[i].Platform == "" {
+			metas[i].Platform = source.Platform
+		}
+		duplicate, err := m.findBlockingDuplicate(metas[i].Platform, metas[i].VideoID, 0)
+		if err != nil {
+			return nil, err
+		}
+		metas[i].DuplicateOf = duplicate
 	}
-	meta.DuplicateOf = duplicate
-	return meta, nil
+	return metas, nil
 }
 
 func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, error) {
-	sourceURL, err := normalizeYouTubeURL(url)
+	source, err := normalizeSourceURL(url)
 	if err != nil {
 		return domain.DownloadItem{}, err
 	}
 
 	settings := m.settings.Current()
-	if err := ensureBinaries(settings); err != nil {
+	if err := ensureBinariesForPlatform(settings, source.Platform); err != nil {
 		return domain.DownloadItem{}, err
 	}
 	if err := util.EnsureDir(settings.DownloadDir); err != nil {
@@ -109,9 +116,9 @@ func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, 
 	}
 
 	item := domain.DownloadItem{
-		SourceURL:       sourceURL,
-		NormalizedURL:   sourceURL,
-		Platform:        domain.PlatformYouTube,
+		SourceURL:       source.URL,
+		NormalizedURL:   source.URL,
+		Platform:        source.Platform,
 		Title:           placeholderTitle,
 		Status:          domain.StatusResolving,
 		ProgressPercent: 0,
@@ -125,7 +132,7 @@ func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, 
 	}
 
 	m.broadcast(domain.DownloadEvent{Type: "created", Item: item})
-	m.startResolving(item.ID, sourceURL)
+	m.startResolving(item.ID, source.URL)
 	return item, nil
 }
 
@@ -211,17 +218,31 @@ func (m *Manager) Get(id int64) (domain.DownloadItem, error) {
 }
 
 func (m *Manager) OpenPath(id int64) error {
+	zap.L().Info("loading download for open path", zap.Int64("id", id))
 	item, err := m.store.GetDownload(id)
 	if err != nil {
+		zap.L().Error("failed to load download for open path", zap.Int64("id", id), zap.Error(err))
 		return err
 	}
+	zap.L().Info(
+		"validating download path before opening",
+		zap.Int64("id", id),
+		zap.String("status", string(item.Status)),
+		zap.String("outputPath", item.OutputPath),
+	)
 	if item.Status != domain.StatusCompleted {
 		return errors.New("只有已完成任务才能打开文件路径")
 	}
 	if !util.FileExists(item.OutputPath) {
+		zap.L().Warn("download output file missing", zap.Int64("id", id), zap.String("outputPath", item.OutputPath))
 		return errors.New("文件不存在，无法打开文件路径")
 	}
-	return util.OpenFolderAndSelectFile(item.OutputPath)
+	if err := util.OpenFolderAndSelectFile(item.OutputPath); err != nil {
+		zap.L().Error("open containing folder failed", zap.Int64("id", id), zap.String("outputPath", item.OutputPath), zap.Error(err))
+		return err
+	}
+	zap.L().Info("open containing folder requested", zap.Int64("id", id), zap.String("outputPath", item.OutputPath))
+	return nil
 }
 
 func (m *Manager) Subscribe() (<-chan domain.DownloadEvent, func()) {
@@ -267,7 +288,7 @@ func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL strin
 	defer m.finishResolving(id, job)
 
 	settings := m.settings.Current()
-	meta, err := m.runner.Inspect(ctx, settings, sourceURL)
+	metas, err := m.runner.Inspect(ctx, settings, sourceURL)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return
@@ -278,50 +299,93 @@ func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL strin
 		}
 		return
 	}
-
-	duplicate, err := m.findBlockingDuplicate(meta.VideoID, id)
-	if err != nil {
-		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, err.Error(), "", "", nil, nil)
-		if updateErr == nil {
-			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
-		}
-		return
-	}
-	if duplicate != nil {
-		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, "该视频已存在任务", "", "", nil, nil)
+	if len(metas) == 0 {
+		updated, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, "未解析到可下载视频", "", "", nil, nil)
 		if updateErr == nil {
 			m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		}
 		return
 	}
 
-	update := domain.DownloadItem{
-		NormalizedURL:  meta.NormalizedURL,
-		Platform:       domain.PlatformYouTube,
-		VideoID:        meta.VideoID,
-		Title:          meta.Title,
-		ThumbnailURL:   meta.ThumbnailURL,
-		QualityLabel:   meta.QualityLabel,
-		Container:      meta.Container,
-		OutputFilename: meta.SuggestedFilename,
-		OutputPath:     filepath.Join(settings.DownloadDir, meta.SuggestedFilename),
-	}
-
-	updated, err := m.store.UpdateMetadata(id, update, domain.StatusQueued, "")
+	placeholder, err := m.store.GetDownload(id)
 	if err != nil {
-		errMsg := err.Error()
-		if errors.Is(err, db.ErrDuplicate) {
-			errMsg = "该视频已存在任务"
-		}
-		failed, updateErr := m.store.UpdateProgress(id, domain.StatusFailed, 0, 0, 0, 0, errMsg, "", "", nil, nil)
-		if updateErr == nil {
-			m.broadcast(domain.DownloadEvent{Type: "updated", Item: failed})
-		}
 		return
 	}
+	platform := placeholder.Platform
+	if platform == "" {
+		platform = metas[0].Platform
+	}
+	if platform == "" {
+		platform = domain.PlatformYouTube
+	}
+	for i := range metas {
+		if metas[i].Platform == "" {
+			metas[i].Platform = platform
+		}
+	}
 
-	m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
-	m.enqueue(id)
+	for index, meta := range metas {
+		targetID := id
+		if index > 0 {
+			created, err := m.store.CreateDownload(domain.DownloadItem{
+				SourceURL:       sourceURL,
+				NormalizedURL:   meta.NormalizedURL,
+				Platform:        meta.Platform,
+				Title:           placeholderTitle,
+				Status:          domain.StatusResolving,
+				ProgressPercent: 0,
+			})
+			if err != nil {
+				continue
+			}
+			targetID = created.ID
+			m.broadcast(domain.DownloadEvent{Type: "created", Item: created})
+		}
+
+		duplicate, err := m.findBlockingDuplicate(meta.Platform, meta.VideoID, targetID)
+		if err != nil {
+			updated, updateErr := m.store.UpdateProgress(targetID, domain.StatusFailed, 0, 0, 0, 0, err.Error(), "", "", nil, nil)
+			if updateErr == nil {
+				m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+			}
+			continue
+		}
+		if duplicate != nil {
+			updated, updateErr := m.store.UpdateProgress(targetID, domain.StatusFailed, 0, 0, 0, 0, "该视频已存在任务", "", "", nil, nil)
+			if updateErr == nil {
+				m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+			}
+			continue
+		}
+
+		update := domain.DownloadItem{
+			NormalizedURL:  meta.NormalizedURL,
+			Platform:       meta.Platform,
+			VideoID:        meta.VideoID,
+			Title:          meta.Title,
+			ThumbnailURL:   meta.ThumbnailURL,
+			QualityLabel:   meta.QualityLabel,
+			Container:      meta.Container,
+			OutputFilename: meta.SuggestedFilename,
+			OutputPath:     filepath.Join(settings.DownloadDir, meta.SuggestedFilename),
+		}
+
+		updated, err := m.store.UpdateMetadata(targetID, update, domain.StatusQueued, "")
+		if err != nil {
+			errMsg := err.Error()
+			if errors.Is(err, db.ErrDuplicate) {
+				errMsg = "该视频已存在任务"
+			}
+			failed, updateErr := m.store.UpdateProgress(targetID, domain.StatusFailed, 0, 0, 0, 0, errMsg, "", "", nil, nil)
+			if updateErr == nil {
+				m.broadcast(domain.DownloadEvent{Type: "updated", Item: failed})
+			}
+			continue
+		}
+
+		m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+		m.enqueue(targetID)
+	}
 }
 
 func (m *Manager) enqueue(id int64) {
@@ -614,8 +678,8 @@ func (m *Manager) broadcast(event domain.DownloadEvent) {
 	}
 }
 
-func (m *Manager) findBlockingDuplicate(videoID string, excludeID int64) (*domain.DownloadItem, error) {
-	items, err := m.store.FindByVideoID(videoID)
+func (m *Manager) findBlockingDuplicate(platform string, videoID string, excludeID int64) (*domain.DownloadItem, error) {
+	items, err := m.store.FindByPlatformVideoID(platform, videoID)
 	if err != nil {
 		return nil, err
 	}
@@ -638,6 +702,16 @@ func (m *Manager) findBlockingDuplicate(videoID string, excludeID int64) (*domai
 		}
 	}
 	return nil, nil
+}
+
+func ensureBinariesForPlatform(settings config.Settings, platform string) error {
+	if platform == domain.PlatformYouTube && !util.FileExists(settings.YtDlpPath) {
+		return errors.New("未找到 yt-dlp.exe，请到设置页下载安装依赖或手动配置路径")
+	}
+	if !util.FileExists(settings.FfmpegPath) {
+		return errors.New("未找到 ffmpeg.exe，请到设置页下载安装依赖或手动配置路径")
+	}
+	return nil
 }
 
 func ensureBinaries(settings config.Settings) error {

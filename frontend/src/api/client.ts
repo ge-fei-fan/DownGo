@@ -23,6 +23,7 @@ export type DownloadItem = {
 }
 
 export type InspectResult = {
+  platform: string
   normalizedUrl: string
   videoId: string
   title: string
@@ -58,7 +59,42 @@ export type SettingsDTO = {
   concurrentDownloads: number
   ytDlpPath: string
   ffmpegPath: string
+  bilibiliMid: number
+  bilibiliUname: string
+  bilibiliFace: string
+  bilibiliLoginAt: string
   accessPassword?: string
+}
+
+export type BilibiliSessionDTO = {
+  loggedIn: boolean
+  mid: number
+  uname: string
+  face: string
+  faceLocal: string
+  loginAt: string
+  status: 'missing' | 'unchecked' | 'valid' | 'invalid' | 'error'
+  checkedAt: string
+  message: string
+  level: number
+  sex: string
+  sign: string
+  vipStatus: number
+  vipType: number
+  vipLabel: string
+  vipDueDate: number
+  seniorMember: boolean
+}
+
+export type BilibiliQRCodeDTO = {
+  url: string
+  qrcodeKey: string
+}
+
+export type BilibiliPollDTO = {
+  code: number
+  message: string
+  session?: BilibiliSessionDTO
 }
 
 export type DependencyFileStatus = {
@@ -74,6 +110,28 @@ export type DependenciesDTO = {
   ffmpeg: DependencyFileStatus
 }
 
+export type DirectorySelectionDTO = {
+  path: string
+}
+
+export type DependencyInstallEvent = {
+  type: 'started' | 'progress' | 'skipped' | 'completed' | 'failed' | 'done'
+  name?: string
+  path?: string
+  bytes?: number
+  totalBytes?: number
+  percent?: number
+  error?: string
+  status?: DependenciesDTO
+}
+
+export type DependencyInstallSnapshot = {
+  installing: boolean
+  events: Record<string, DependencyInstallEvent>
+  status: DependenciesDTO
+  error?: string
+}
+
 export type DownloadEvent = {
   type: 'created' | 'updated' | 'removed'
   item: DownloadItem
@@ -81,6 +139,12 @@ export type DownloadEvent = {
 
 type OpenDownloadEventsOptions = {
   onMessage: (event: DownloadEvent) => void
+  onOpen?: () => void
+  onError?: () => void
+}
+
+type OpenDependencyInstallEventsOptions = {
+  onMessage: (event: DependencyInstallEvent) => void
   onOpen?: () => void
   onError?: () => void
 }
@@ -135,18 +199,73 @@ export async function updateSettings(payload: SettingsDTO) {
   })
 }
 
+export async function selectDownloadDir(currentDir: string) {
+  return request<DirectorySelectionDTO | undefined>('/api/settings/download-dir/select', {
+    method: 'POST',
+    body: JSON.stringify({ currentDir }),
+  })
+}
+
+export async function createBilibiliQRCode() {
+  return request<BilibiliQRCodeDTO>('/api/bilibili/qrcode', { method: 'POST' })
+}
+
+export async function pollBilibiliQRCode(key: string) {
+  return request<BilibiliPollDTO>(`/api/bilibili/qrcode/poll?key=${encodeURIComponent(key)}`)
+}
+
+export async function getBilibiliSession() {
+  return request<BilibiliSessionDTO>('/api/bilibili/session')
+}
+
+export async function checkBilibiliSession() {
+  return request<BilibiliSessionDTO>('/api/bilibili/session/check', { method: 'POST' })
+}
+
+export async function clearBilibiliSession() {
+  return request<void>('/api/bilibili/session', { method: 'DELETE' })
+}
+
+export function bilibiliAvatarURL(session?: BilibiliSessionDTO | null) {
+  if (!session?.faceLocal) return ''
+  const query = new URLSearchParams()
+  if (token) query.set('token', token)
+  query.set('t', session.checkedAt || session.loginAt || String(Date.now()))
+  return `${session.faceLocal}?${query.toString()}`
+}
+
 export async function getDependencies() {
   return request<DependenciesDTO>('/api/tools/dependencies')
 }
 
 export async function installMissingDependencies() {
-  return request<DependenciesDTO>('/api/tools/dependencies/install', {
+  return request<DependencyInstallSnapshot>('/api/tools/dependencies/install', {
     method: 'POST',
   })
 }
 
+export async function getDependencyInstallStatus() {
+  return request<DependencyInstallSnapshot>('/api/tools/dependencies/install/status')
+}
+
+export function openDependencyInstallEvents(options: OpenDependencyInstallEventsOptions) {
+  const query = token ? `?token=${encodeURIComponent(token)}` : ''
+  const source = new EventSource(`/api/tools/dependencies/install/events${query}`)
+  source.onopen = () => {
+    options.onOpen?.()
+  }
+  source.onmessage = (event) => {
+    const payload = JSON.parse(event.data) as DependencyInstallEvent
+    options.onMessage(payload)
+  }
+  source.onerror = () => {
+    options.onError?.()
+  }
+  return source
+}
+
 export async function inspectDownload(url: string) {
-  return request<InspectResult>('/api/downloads/inspect', {
+  return request<InspectResult[]>('/api/downloads/inspect', {
     method: 'POST',
     body: JSON.stringify({ url }),
   })
