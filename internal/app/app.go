@@ -16,6 +16,7 @@ import (
 	"example.com/downgo/internal/db"
 	"example.com/downgo/internal/deps"
 	"example.com/downgo/internal/download"
+	"example.com/downgo/internal/favorites"
 	"example.com/downgo/internal/httpapi"
 	"example.com/downgo/internal/util"
 	"example.com/downgo/webui"
@@ -29,6 +30,7 @@ type App struct {
 	http      *http.Server
 	password  string
 	manager   *download.Manager
+	favorites *favorites.Service
 	appCtx    context.Context
 	appCancel context.CancelFunc
 
@@ -66,15 +68,16 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 		}
 	}
 
-	manager, err := download.NewManager(store, settingsService, download.NewPlatformRunner())
+	manager, err := download.NewManagerWithBaseDir(baseDir, store, settingsService, download.NewPlatformRunner())
 	if err != nil {
 		_ = store.Close()
 		return nil, err
 	}
 
 	depsService := deps.NewService(baseDir, nil)
+	favoritesService := favorites.NewService(store, settingsService, manager, nil)
 	tokens := auth.NewTokenManager(baseDir + "|downgo")
-	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, tokens)
+	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, favoritesService, tokens)
 	router := httpapi.NewRouter(api, webui.Assets)
 	appCtx, appCancel := context.WithCancel(context.Background())
 
@@ -94,6 +97,7 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 		http:      httpServer,
 		password:  initialPassword,
 		manager:   manager,
+		favorites: favoritesService,
 		appCtx:    appCtx,
 		appCancel: appCancel,
 		status:    "未启动",
@@ -122,6 +126,9 @@ func (a *App) Start() error {
 	}
 	a.logger.Info("http server listening", zap.String("addr", addr))
 	a.logger.Info("available urls", zap.Strings("urls", a.AccessURLs()))
+	if a.favorites != nil {
+		a.favorites.Start()
+	}
 
 	go func() {
 		if err := a.http.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -161,6 +168,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 			a.appCancel()
 		}
 
+		if a.favorites != nil {
+			a.favorites.Shutdown()
+		}
 		if a.manager != nil {
 			if err := a.manager.Shutdown(ctx); err != nil {
 				shutdownErr = err

@@ -295,6 +295,160 @@ func (s *Store) MarkMissingCompletedAsFailed() ([]domain.DownloadItem, error) {
 	return updated, nil
 }
 
+func (s *Store) GetFavoriteSubscription() (domain.FavoriteSubscription, error) {
+	row := s.db.QueryRow(`
+		SELECT media_id, title, enabled, last_checked_at, last_error, updated_at
+		FROM bilibili_favorite_subscription
+		WHERE id = 1
+	`)
+	return scanFavoriteSubscription(row)
+}
+
+func (s *Store) UpsertFavoriteSubscription(sub domain.FavoriteSubscription) (domain.FavoriteSubscription, error) {
+	now := time.Now().UTC()
+	enabled := 0
+	if sub.Enabled {
+		enabled = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO bilibili_favorite_subscription(id, media_id, title, enabled, last_checked_at, last_error, updated_at)
+		VALUES(1, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			media_id=excluded.media_id,
+			title=excluded.title,
+			enabled=excluded.enabled,
+			last_checked_at=excluded.last_checked_at,
+			last_error=excluded.last_error,
+			updated_at=excluded.updated_at
+	`, sub.MediaID, sub.Title, enabled, sub.LastCheckedAt, sub.LastError, now)
+	if err != nil {
+		return domain.FavoriteSubscription{}, err
+	}
+	return s.GetFavoriteSubscription()
+}
+
+func (s *Store) UpdateFavoriteSubscriptionCheck(lastCheckedAt time.Time, lastError string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO bilibili_favorite_subscription(id, last_checked_at, last_error, updated_at)
+		VALUES(1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			last_checked_at=excluded.last_checked_at,
+			last_error=excluded.last_error,
+			updated_at=excluded.updated_at
+	`, lastCheckedAt.UTC(), lastError, time.Now().UTC())
+	return err
+}
+
+func (s *Store) UpsertFavoriteResource(origin domain.FavoriteOrigin, status string, lastError string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+		INSERT INTO bilibili_favorite_resources(
+			media_id, resource_id, resource_type, bvid, title, status, last_error, created_at, updated_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(media_id, resource_id, resource_type) DO UPDATE SET
+			bvid=excluded.bvid,
+			title=excluded.title,
+			status=excluded.status,
+			last_error=excluded.last_error,
+			updated_at=excluded.updated_at
+	`, origin.MediaID, origin.ResourceID, origin.ResourceType, origin.Bvid, origin.Title, status, lastError, now, now)
+	return err
+}
+
+func (s *Store) MarkFavoriteResourceRemoved(origin domain.FavoriteOrigin) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+		UPDATE bilibili_favorite_resources
+		SET status = 'removed', last_error = '', removed_at = ?, updated_at = ?
+		WHERE media_id = ? AND resource_id = ? AND resource_type = ?
+	`, now, now, origin.MediaID, origin.ResourceID, origin.ResourceType)
+	return err
+}
+
+func (s *Store) LinkFavoriteDownload(downloadID int64, origin domain.FavoriteOrigin) error {
+	_, err := s.db.Exec(`
+		INSERT OR IGNORE INTO bilibili_favorite_downloads(
+			download_id, media_id, resource_id, resource_type, created_at
+		) VALUES(?, ?, ?, ?, ?)
+	`, downloadID, origin.MediaID, origin.ResourceID, origin.ResourceType, time.Now().UTC())
+	return err
+}
+
+func (s *Store) FavoriteOriginsForDownload(downloadID int64) ([]domain.FavoriteOrigin, error) {
+	rows, err := s.db.Query(`
+		SELECT r.media_id, r.resource_id, r.resource_type, r.bvid, r.title
+		FROM bilibili_favorite_downloads d
+		JOIN bilibili_favorite_resources r
+		  ON r.media_id = d.media_id
+		 AND r.resource_id = d.resource_id
+		 AND r.resource_type = d.resource_type
+		WHERE d.download_id = ?
+	`, downloadID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFavoriteOrigins(rows)
+}
+
+func (s *Store) DownloadsForFavoriteOrigin(origin domain.FavoriteOrigin) ([]domain.DownloadItem, error) {
+	rows, err := s.db.Query(`
+		SELECT `+downloadSelectColumnsD+`
+		FROM bilibili_favorite_downloads fd
+		JOIN downloads d ON d.id = fd.download_id
+		WHERE fd.media_id = ? AND fd.resource_id = ? AND fd.resource_type = ? AND d.deleted_at IS NULL
+		ORDER BY d.id ASC
+	`, origin.MediaID, origin.ResourceID, origin.ResourceType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanDownloads(rows)
+}
+
+func (s *Store) PendingFavoriteResources() ([]domain.FavoriteOrigin, error) {
+	rows, err := s.db.Query(`
+		SELECT media_id, resource_id, resource_type, bvid, title
+		FROM bilibili_favorite_resources
+		WHERE status <> 'removed'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFavoriteOrigins(rows)
+}
+
+func scanFavoriteSubscription(row scanner) (domain.FavoriteSubscription, error) {
+	var sub domain.FavoriteSubscription
+	var enabled int
+	var checkedAt sql.NullTime
+	err := row.Scan(&sub.MediaID, &sub.Title, &enabled, &checkedAt, &sub.LastError, &sub.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.FavoriteSubscription{}, nil
+		}
+		return domain.FavoriteSubscription{}, err
+	}
+	sub.Enabled = enabled == 1
+	if checkedAt.Valid {
+		sub.LastCheckedAt = &checkedAt.Time
+	}
+	return sub, nil
+}
+
+func scanFavoriteOrigins(rows *sql.Rows) ([]domain.FavoriteOrigin, error) {
+	origins := make([]domain.FavoriteOrigin, 0)
+	for rows.Next() {
+		var origin domain.FavoriteOrigin
+		if err := rows.Scan(&origin.MediaID, &origin.ResourceID, &origin.ResourceType, &origin.Bvid, &origin.Title); err != nil {
+			return nil, err
+		}
+		origins = append(origins, origin)
+	}
+	return origins, rows.Err()
+}
+
 var (
 	ErrNotFound  = errors.New("记录不存在")
 	ErrDuplicate = errors.New("下载任务重复")
@@ -304,6 +458,12 @@ const downloadSelectColumns = `
 id, source_url, normalized_url, platform, video_id, title, thumbnail_url, quality_label, container,
 output_filename, output_path, status, progress_percent, speed_bps, eta_seconds,
 error_message, process_pid, created_at, started_at, completed_at, updated_at, deleted_at
+`
+
+const downloadSelectColumnsD = `
+d.id, d.source_url, d.normalized_url, d.platform, d.video_id, d.title, d.thumbnail_url, d.quality_label, d.container,
+d.output_filename, d.output_path, d.status, d.progress_percent, d.speed_bps, d.eta_seconds,
+d.error_message, d.process_pid, d.created_at, d.started_at, d.completed_at, d.updated_at, d.deleted_at
 `
 
 const downloadSelectByIDSQL = `SELECT ` + downloadSelectColumns + ` FROM downloads WHERE id = ?`

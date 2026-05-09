@@ -91,6 +91,20 @@ export type BilibiliQRCodeDTO = {
   qrcodeKey: string
 }
 
+export type FavoriteFolderDTO = {
+  id: number
+  title: string
+}
+
+export type FavoriteSubscriptionDTO = {
+  mediaId: number
+  title: string
+  enabled: boolean
+  lastCheckedAt?: string
+  lastError: string
+  updatedAt: string
+}
+
 export type BilibiliPollDTO = {
   code: number
   message: string
@@ -226,6 +240,25 @@ export async function clearBilibiliSession() {
   return request<void>('/api/bilibili/session', { method: 'DELETE' })
 }
 
+export async function getFavoriteFolders() {
+  return request<FavoriteFolderDTO[]>('/api/bilibili/favorites/folders')
+}
+
+export async function getFavoriteSubscription() {
+  return request<FavoriteSubscriptionDTO>('/api/bilibili/favorites/subscription')
+}
+
+export async function updateFavoriteSubscription(payload: Pick<FavoriteSubscriptionDTO, 'mediaId' | 'title' | 'enabled'>) {
+  return request<FavoriteSubscriptionDTO>('/api/bilibili/favorites/subscription', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function runFavoriteSubscription() {
+  return request<FavoriteSubscriptionDTO>('/api/bilibili/favorites/subscription/run', { method: 'POST' })
+}
+
 export function bilibiliAvatarURL(session?: BilibiliSessionDTO | null) {
   if (!session?.faceLocal) return ''
   const query = new URLSearchParams()
@@ -298,6 +331,11 @@ export async function openDownloadPath(id: number) {
 export function downloadFileURL(id: number) {
   const query = token ? `?token=${encodeURIComponent(token)}` : ''
   return `/api/downloads/${id}/file${query}`
+}
+
+export function downloadThumbnailURL(id: number) {
+  const query = token ? `?token=${encodeURIComponent(token)}` : ''
+  return `/api/downloads/${id}/thumbnail${query}`
 }
 
 export function openDownloadEvents(options: OpenDownloadEventsOptions) {

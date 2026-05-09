@@ -3,12 +3,15 @@ package download
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
+	"example.com/downgo/internal/bilibili"
 	"example.com/downgo/internal/config"
 	"example.com/downgo/internal/db"
 	"example.com/downgo/internal/domain"
@@ -21,6 +24,7 @@ const (
 )
 
 type Manager struct {
+	baseDir  string
 	store    *db.Store
 	settings *config.Service
 	runner   Runner
@@ -51,7 +55,12 @@ type trackedTaskHandles struct {
 }
 
 func NewManager(store *db.Store, settings *config.Service, runner Runner) (*Manager, error) {
+	return NewManagerWithBaseDir("", store, settings, runner)
+}
+
+func NewManagerWithBaseDir(baseDir string, store *db.Store, settings *config.Service, runner Runner) (*Manager, error) {
 	m := &Manager{
+		baseDir:     baseDir,
 		store:       store,
 		settings:    settings,
 		runner:      runner,
@@ -102,6 +111,14 @@ func (m *Manager) Inspect(ctx context.Context, url string) ([]domain.InspectResu
 }
 
 func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, error) {
+	return m.create(ctx, url, nil)
+}
+
+func (m *Manager) CreateWithOrigin(ctx context.Context, url string, origin *domain.FavoriteOrigin) (domain.DownloadItem, error) {
+	return m.create(ctx, url, origin)
+}
+
+func (m *Manager) create(ctx context.Context, url string, origin *domain.FavoriteOrigin) (domain.DownloadItem, error) {
 	source, err := normalizeSourceURL(url)
 	if err != nil {
 		return domain.DownloadItem{}, err
@@ -129,6 +146,11 @@ func (m *Manager) Create(ctx context.Context, url string) (domain.DownloadItem, 
 	item, err = m.store.CreateDownload(item)
 	if err != nil {
 		return domain.DownloadItem{}, err
+	}
+	if origin != nil {
+		if err := m.store.LinkFavoriteDownload(item.ID, *origin); err != nil {
+			return domain.DownloadItem{}, err
+		}
 	}
 
 	m.broadcast(domain.DownloadEvent{Type: "created", Item: item})
@@ -200,6 +222,9 @@ func (m *Manager) Delete(id int64) error {
 		if err := util.DeleteAssociatedFiles(item.OutputPath); err != nil {
 			m.scheduleDeleteRetry(item.OutputPath)
 		}
+	}
+	if item.ThumbnailURL == m.thumbnailURL(id) {
+		_ = os.Remove(m.thumbnailPath(id))
 	}
 	if err := m.store.MarkDeleted(id); err != nil {
 		return err
@@ -323,6 +348,11 @@ func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL strin
 			metas[i].Platform = platform
 		}
 	}
+	origins, err := m.store.FavoriteOriginsForDownload(id)
+	if err != nil {
+		origins = nil
+		zap.L().Warn("load favorite origins for download failed", zap.Int64("id", id), zap.Error(err))
+	}
 
 	for index, meta := range metas {
 		targetID := id
@@ -339,6 +369,11 @@ func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL strin
 				continue
 			}
 			targetID = created.ID
+			for _, origin := range origins {
+				if err := m.store.LinkFavoriteDownload(targetID, origin); err != nil {
+					zap.L().Warn("link favorite origin to expanded download failed", zap.Int64("downloadId", targetID), zap.Error(err))
+				}
+			}
 			m.broadcast(domain.DownloadEvent{Type: "created", Item: created})
 		}
 
@@ -351,19 +386,18 @@ func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL strin
 			continue
 		}
 		if duplicate != nil {
-			updated, updateErr := m.store.UpdateProgress(targetID, domain.StatusFailed, 0, 0, 0, 0, "该视频已存在任务", "", "", nil, nil)
-			if updateErr == nil {
-				m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
+			m.linkFavoriteOriginsToDownload(duplicate.ID, origins)
+			if err := m.removeDuplicatePlaceholder(targetID); err != nil {
+				zap.L().Warn("remove duplicate placeholder failed", zap.Int64("id", targetID), zap.Error(err))
 			}
 			continue
 		}
-
 		update := domain.DownloadItem{
 			NormalizedURL:  meta.NormalizedURL,
 			Platform:       meta.Platform,
 			VideoID:        meta.VideoID,
 			Title:          meta.Title,
-			ThumbnailURL:   meta.ThumbnailURL,
+			ThumbnailURL:   m.cacheThumbnail(ctx, targetID, meta),
 			QualityLabel:   meta.QualityLabel,
 			Container:      meta.Container,
 			OutputFilename: meta.SuggestedFilename,
@@ -372,10 +406,18 @@ func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL strin
 
 		updated, err := m.store.UpdateMetadata(targetID, update, domain.StatusQueued, "")
 		if err != nil {
-			errMsg := err.Error()
 			if errors.Is(err, db.ErrDuplicate) {
-				errMsg = "该视频已存在任务"
+				if duplicate, findErr := m.findBlockingDuplicate(meta.Platform, meta.VideoID, targetID); findErr != nil {
+					zap.L().Warn("find duplicate after metadata update failed", zap.Int64("id", targetID), zap.Error(findErr))
+				} else if duplicate != nil {
+					m.linkFavoriteOriginsToDownload(duplicate.ID, origins)
+				}
+				if removeErr := m.removeDuplicatePlaceholder(targetID); removeErr != nil {
+					zap.L().Warn("remove duplicate placeholder after metadata update failed", zap.Int64("id", targetID), zap.Error(removeErr))
+				}
+				continue
 			}
+			errMsg := err.Error()
 			failed, updateErr := m.store.UpdateProgress(targetID, domain.StatusFailed, 0, 0, 0, 0, errMsg, "", "", nil, nil)
 			if updateErr == nil {
 				m.broadcast(domain.DownloadEvent{Type: "updated", Item: failed})
@@ -386,6 +428,50 @@ func (m *Manager) resolveAndQueue(ctx context.Context, id int64, sourceURL strin
 		m.broadcast(domain.DownloadEvent{Type: "updated", Item: updated})
 		m.enqueue(targetID)
 	}
+}
+
+func (m *Manager) linkFavoriteOriginsToDownload(downloadID int64, origins []domain.FavoriteOrigin) {
+	for _, origin := range origins {
+		if err := m.store.LinkFavoriteDownload(downloadID, origin); err != nil {
+			zap.L().Warn("link favorite origin to duplicate download failed", zap.Int64("downloadId", downloadID), zap.Error(err))
+		}
+	}
+}
+
+func (m *Manager) removeDuplicatePlaceholder(id int64) error {
+	item, err := m.store.GetDownload(id)
+	if err != nil {
+		return err
+	}
+	if err := m.store.MarkDeleted(id); err != nil {
+		return err
+	}
+	m.broadcast(domain.DownloadEvent{Type: "removed", Item: item})
+	return nil
+}
+
+func (m *Manager) cacheThumbnail(ctx context.Context, id int64, meta domain.InspectResult) string {
+	if m.baseDir == "" || meta.Platform != domain.PlatformBilibili || meta.ThumbnailURL == "" {
+		return meta.ThumbnailURL
+	}
+	targetPath := m.thumbnailPath(id)
+	if err := bilibili.NewClient(nil).DownloadImage(ctx, meta.ThumbnailURL, targetPath); err != nil {
+		zap.L().Warn("cache bilibili thumbnail failed", zap.Int64("id", id), zap.String("thumbnailUrl", meta.ThumbnailURL), zap.Error(err))
+		return meta.ThumbnailURL
+	}
+	return m.thumbnailURL(id)
+}
+
+func (m *Manager) ThumbnailPath(id int64) string {
+	return m.thumbnailPath(id)
+}
+
+func (m *Manager) thumbnailPath(id int64) string {
+	return filepath.Join(m.baseDir, "data", "bilibili", "covers", strconv.FormatInt(id, 10))
+}
+
+func (m *Manager) thumbnailURL(id int64) string {
+	return "/api/downloads/" + strconv.FormatInt(id, 10) + "/thumbnail"
 }
 
 func (m *Manager) enqueue(id int64) {

@@ -65,3 +65,32 @@ type DownloadEvent struct {
 	Type string       `json:"type"`
 	Item DownloadItem `json:"item"`
 }
+
+type FavoriteFolder struct {
+	ID    int64  `json:"id"`
+	Title string `json:"title"`
+}
+
+type FavoriteSubscription struct {
+	MediaID       int64      `json:"mediaId"`
+	Title         string     `json:"title"`
+	Enabled       bool       `json:"enabled"`
+	LastCheckedAt *time.Time `json:"lastCheckedAt,omitempty"`
+	LastError     string     `json:"lastError"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
+}
+
+type FavoriteMedia struct {
+	ID    int64  `json:"id"`
+	Type  int    `json:"type"`
+	Title string `json:"title"`
+	Bvid  string `json:"bvid"`
+}
+
+type FavoriteOrigin struct {
+	MediaID      int64
+	ResourceID   int64
+	ResourceType int
+	Bvid         string
+	Title        string
+}

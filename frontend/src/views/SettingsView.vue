@@ -7,13 +7,19 @@ import {
   checkBilibiliSession,
   clearBilibiliSession,
   createBilibiliQRCode,
+  getFavoriteFolders,
+  getFavoriteSubscription,
   getBilibiliSession,
   getSettings,
   pollBilibiliQRCode,
+  runFavoriteSubscription,
   selectDownloadDir,
+  updateFavoriteSubscription,
   updateSettings,
   type BilibiliSessionDTO,
   type DependencyInstallEvent,
+  type FavoriteFolderDTO,
+  type FavoriteSubscriptionDTO,
   type SettingsDTO,
 } from '@/api/client'
 import { useDepsStore } from '@/stores/deps'
@@ -30,7 +36,13 @@ const biliQrUrl = ref('')
 const biliQrKey = ref('')
 const biliQrStatusCode = ref(1)
 const biliSession = ref<BilibiliSessionDTO | null>(null)
+const favoriteFolders = ref<FavoriteFolderDTO[]>([])
+const favoriteSubscription = ref<FavoriteSubscriptionDTO | null>(null)
+const favoriteLoading = ref(false)
+const favoriteSaving = ref(false)
+const favoriteRunning = ref(false)
 let biliPollTimer: number | undefined
+let favoriteSavePromise: Promise<boolean> | null = null
 const form = reactive<SettingsDTO>({
   bindHost: '0.0.0.0',
   port: 12225,
@@ -46,6 +58,10 @@ const form = reactive<SettingsDTO>({
 })
 
 const biliLoggedIn = computed(() => Boolean(biliSession.value?.loggedIn))
+const favoriteForm = reactive({ mediaId: 0, title: '', enabled: false })
+const favoriteFolderOptions = computed(() =>
+  favoriteFolders.value.map((folder) => ({ label: folder.title, value: folder.id })),
+)
 
 async function load() {
   loading.value = true
@@ -53,6 +69,10 @@ async function load() {
     const settings = await getSettings()
     Object.assign(form, settings, { accessPassword: '' })
     await loadBilibiliSession()
+    await loadFavoriteSubscription()
+    if (biliSession.value?.loggedIn) {
+      await loadFavoriteFolders()
+    }
   } catch (error) {
     message.error(error instanceof Error ? error.message : '加载设置失败')
   } finally {
@@ -75,6 +95,14 @@ async function save() {
 
 async function loadBilibiliSession() {
   biliSession.value = await getBilibiliSession()
+}
+
+async function loadFavoriteSubscription() {
+  favoriteSubscription.value = await getFavoriteSubscription()
+  favoriteForm.mediaId = favoriteSubscription.value.mediaId || 0
+  favoriteForm.title = favoriteSubscription.value.title || ''
+  favoriteForm.enabled = Boolean(favoriteSubscription.value.enabled)
+  ensureFavoriteFolderOption(favoriteSubscription.value)
 }
 
 async function chooseDownloadDir() {
@@ -163,6 +191,134 @@ async function checkBilibiliLogin() {
     message.error(error instanceof Error ? error.message : '检查 Bilibili 登录状态失败')
   } finally {
     biliChecking.value = false
+  }
+}
+
+async function loadFavoriteFolders() {
+  favoriteLoading.value = true
+  try {
+    favoriteFolders.value = await getFavoriteFolders()
+    ensureFavoriteFolderOption(favoriteSubscription.value)
+    if (favoriteFolders.value.length === 0) {
+      message.warning('未找到可订阅的 Bilibili 收藏夹')
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '获取 Bilibili 收藏夹失败')
+  } finally {
+    favoriteLoading.value = false
+  }
+}
+
+function ensureFavoriteFolderOption(subscription = favoriteSubscription.value) {
+  if (!subscription?.mediaId || !subscription.title) {
+    return
+  }
+  if (favoriteFolders.value.some((folder) => folder.id === subscription.mediaId)) {
+    return
+  }
+  favoriteFolders.value = [{ id: subscription.mediaId, title: subscription.title }, ...favoriteFolders.value]
+}
+
+function favoriteFormSnapshot() {
+  return {
+    mediaId: favoriteForm.mediaId,
+    title: favoriteForm.title,
+    enabled: favoriteForm.enabled,
+  }
+}
+
+function restoreFavoriteForm(snapshot = favoriteSubscription.value) {
+  favoriteForm.mediaId = snapshot?.mediaId || 0
+  favoriteForm.title = snapshot?.title || ''
+  favoriteForm.enabled = Boolean(snapshot?.enabled)
+  ensureFavoriteFolderOption(snapshot)
+}
+
+function favoriteFormMatchesSubscription() {
+  return (
+    favoriteSubscription.value !== null &&
+    favoriteForm.mediaId === (favoriteSubscription.value.mediaId || 0) &&
+    favoriteForm.title === (favoriteSubscription.value.title || '') &&
+    favoriteForm.enabled === Boolean(favoriteSubscription.value.enabled)
+  )
+}
+
+async function persistFavoriteSubscription(previous = favoriteFormSnapshot(), successMessage = 'Bilibili 收藏夹订阅已保存') {
+  const next = favoriteFormSnapshot()
+  if (favoriteSavePromise) {
+    await favoriteSavePromise
+  }
+  if (next.enabled && !next.mediaId) {
+    favoriteForm.enabled = false
+    message.warning('请先选择 Bilibili 收藏夹')
+    return false
+  }
+
+  favoriteSaving.value = true
+  const saveTask = updateFavoriteSubscription({
+    mediaId: next.mediaId,
+    title: next.title,
+    enabled: next.enabled,
+  })
+    .then((subscription) => {
+      favoriteSubscription.value = subscription
+      restoreFavoriteForm(subscription)
+      message.success(successMessage)
+      return true
+    })
+    .catch((error) => {
+      restoreFavoriteForm(previous)
+      message.error(error instanceof Error ? error.message : '保存 Bilibili 收藏夹订阅失败')
+      return false
+    })
+    .finally(() => {
+      favoriteSaving.value = false
+      favoriteSavePromise = null
+    })
+  favoriteSavePromise = saveTask
+  return saveTask
+}
+
+async function onFavoriteFolderAutoChange(value: number) {
+  const previous = favoriteFormSnapshot()
+  const folder = favoriteFolders.value.find((item) => item.id === value)
+  favoriteForm.title = folder?.title ?? ''
+  await persistFavoriteSubscription(previous, 'Bilibili 收藏夹已保存')
+}
+
+async function onFavoriteEnabledChange() {
+  const previous = favoriteSubscription.value
+    ? {
+        mediaId: favoriteSubscription.value.mediaId || 0,
+        title: favoriteSubscription.value.title || '',
+        enabled: Boolean(favoriteSubscription.value.enabled),
+      }
+    : favoriteFormSnapshot()
+  await persistFavoriteSubscription(previous, favoriteForm.enabled ? 'Bilibili 收藏夹订阅已启用' : 'Bilibili 收藏夹订阅已关闭')
+}
+
+async function runFavoriteNow() {
+  favoriteRunning.value = true
+  try {
+    if (favoriteSavePromise) {
+      const saved = await favoriteSavePromise
+      if (!saved) {
+        return
+      }
+    }
+    if (!favoriteFormMatchesSubscription()) {
+      const saved = await persistFavoriteSubscription(favoriteSubscription.value ?? favoriteFormSnapshot(), 'Bilibili 收藏夹已保存')
+      if (!saved) {
+        return
+      }
+    }
+    favoriteSubscription.value = await runFavoriteSubscription()
+    restoreFavoriteForm(favoriteSubscription.value)
+    message.success('已检查 Bilibili 收藏夹')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '检查 Bilibili 收藏夹失败')
+  } finally {
+    favoriteRunning.value = false
   }
 }
 
@@ -389,6 +545,37 @@ onBeforeUnmount(stopBilibiliPolling)
           <div v-if="!biliLoggedIn" class="field-hint">点击“扫码登录”后使用 Bilibili 手机客户端扫码确认。</div>
         </div>
       </div>
+
+      <div class="bili-card favorite-card">
+        <div class="favorite-main">
+          <div class="bili-title">
+            <span>Bilibili 收藏夹订阅</span>
+            <a-tag :color="favoriteForm.enabled ? 'processing' : 'default'">
+              {{ favoriteForm.enabled ? '已启用' : '未启用' }}
+            </a-tag>
+          </div>
+          <div class="field-hint">每 10 分钟检查一次收藏夹；视频全部下载完成后自动移出收藏夹。</div>
+          <div class="favorite-controls">
+            <a-select
+              v-model:value="favoriteForm.mediaId"
+              :options="favoriteFolderOptions"
+              :loading="favoriteLoading"
+              :disabled="favoriteSaving"
+              placeholder="请选择收藏夹"
+              style="min-width: 240px"
+              @dropdownVisibleChange="(open: boolean) => open && favoriteFolders.length === 0 && loadFavoriteFolders()"
+              @change="onFavoriteFolderAutoChange"
+            />
+            <a-switch v-model:checked="favoriteForm.enabled" :loading="favoriteSaving" :disabled="favoriteSaving" @change="onFavoriteEnabledChange" />
+            <a-button :loading="favoriteLoading" @click="loadFavoriteFolders">刷新收藏夹</a-button>
+            <a-button :disabled="!favoriteForm.enabled || favoriteSaving" :loading="favoriteRunning" @click="runFavoriteNow">立即检查</a-button>
+          </div>
+          <div class="bili-meta">
+            当前收藏夹：{{ favoriteForm.title || '-' }} 路 上次检查：{{ formatBiliLoginAt(favoriteSubscription?.lastCheckedAt) }}
+          </div>
+          <div v-if="favoriteSubscription?.lastError" class="deps-error">{{ favoriteSubscription.lastError }}</div>
+        </div>
+      </div>
     </div>
 
     <a-divider />
@@ -515,6 +702,23 @@ h1 {
   font-size: 12px;
   line-height: 1.6;
   word-break: break-all;
+}
+
+.favorite-card {
+  align-items: stretch;
+}
+
+.favorite-main {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+
+.favorite-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .bili-qrcode-box {

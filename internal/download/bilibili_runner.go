@@ -33,19 +33,12 @@ func (r *BilibiliRunner) Inspect(ctx context.Context, settings config.Settings, 
 		return nil, err
 	}
 	client := r.biliClient()
-	info, requestedPage, err := client.GetVideoInfo(ctx, settings.BilibiliSessdata, resolvedURL)
+	info, _, err := client.GetVideoInfo(ctx, settings.BilibiliSessdata, resolvedURL)
 	if err != nil {
 		return nil, err
 	}
 
 	pages := info.Pages
-	if requestedPage > 0 {
-		page, ok := findBilibiliPage(info.Pages, requestedPage)
-		if !ok {
-			return nil, fmt.Errorf("未找到 Bilibili 第 %d P", requestedPage)
-		}
-		pages = []bilibili.Page{page}
-	}
 
 	results := make([]domain.InspectResult, 0, len(pages))
 	for _, page := range pages {
@@ -225,15 +218,6 @@ func (r *BilibiliRunner) httpClient() *http.Client {
 		return r.http
 	}
 	return http.DefaultClient
-}
-
-func findBilibiliPage(pages []bilibili.Page, pageNumber int) (bilibili.Page, bool) {
-	for _, page := range pages {
-		if page.Page == pageNumber {
-			return page, true
-		}
-	}
-	return bilibili.Page{}, false
 }
 
 func bilibiliPageTitle(title string, page bilibili.Page, multiPage bool) string {

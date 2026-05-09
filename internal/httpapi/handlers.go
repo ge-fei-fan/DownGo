@@ -24,15 +24,17 @@ import (
 	"example.com/downgo/internal/deps"
 	"example.com/downgo/internal/domain"
 	"example.com/downgo/internal/download"
+	"example.com/downgo/internal/favorites"
 	"example.com/downgo/internal/util"
 )
 
 type API struct {
-	baseDir  string
-	settings *config.Service
-	manager  *download.Manager
-	deps     *deps.Service
-	tokens   *auth.TokenManager
+	baseDir   string
+	settings  *config.Service
+	manager   *download.Manager
+	deps      *deps.Service
+	favorites *favorites.Service
+	tokens    *auth.TokenManager
 }
 
 type loginRequest struct {
@@ -45,6 +47,12 @@ type inspectRequest struct {
 
 type createRequest struct {
 	URL string `json:"url"`
+}
+
+type favoriteSubscriptionRequest struct {
+	MediaID int64  `json:"mediaId"`
+	Title   string `json:"title"`
+	Enabled bool   `json:"enabled"`
 }
 
 type selectDownloadDirRequest struct {
@@ -70,6 +78,10 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 		protected.Post("/api/bilibili/session/check", api.handleCheckBilibiliSession)
 		protected.Get("/api/bilibili/avatar", api.handleBilibiliAvatar)
 		protected.Delete("/api/bilibili/session", api.handleClearBilibiliSession)
+		protected.Get("/api/bilibili/favorites/folders", api.handleBilibiliFavoriteFolders)
+		protected.Get("/api/bilibili/favorites/subscription", api.handleGetFavoriteSubscription)
+		protected.Put("/api/bilibili/favorites/subscription", api.handlePutFavoriteSubscription)
+		protected.Post("/api/bilibili/favorites/subscription/run", api.handleRunFavoriteSubscription)
 		protected.Get("/api/tools/dependencies", api.handleGetDependencies)
 		protected.Post("/api/tools/dependencies/install", api.handleInstallDependencies)
 		protected.Get("/api/tools/dependencies/install/status", api.handleInstallDependenciesStatus)
@@ -81,6 +93,7 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 		protected.Post("/api/downloads/{id}/retry", api.handleRetry)
 		protected.Post("/api/downloads/{id}/open-path", api.handleOpenPath)
 		protected.Delete("/api/downloads/{id}", api.handleDelete)
+		protected.Get("/api/downloads/{id}/thumbnail", api.handleThumbnail)
 		protected.Get("/api/downloads/{id}/file", api.handleFile)
 	})
 
@@ -111,8 +124,8 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	return r
 }
 
-func NewAPI(baseDir string, settings *config.Service, manager *download.Manager, depsService *deps.Service, tokens *auth.TokenManager) *API {
-	return &API{baseDir: baseDir, settings: settings, manager: manager, deps: depsService, tokens: tokens}
+func NewAPI(baseDir string, settings *config.Service, manager *download.Manager, depsService *deps.Service, favoritesService *favorites.Service, tokens *auth.TokenManager) *API {
+	return &API{baseDir: baseDir, settings: settings, manager: manager, deps: depsService, favorites: favoritesService, tokens: tokens}
 }
 
 func (api *API) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +361,71 @@ func (api *API) bilibiliAvatarPath() string {
 	return filepath.Join(api.baseDir, "data", "bilibili", "avatar")
 }
 
+func (api *API) handleBilibiliFavoriteFolders(w http.ResponseWriter, r *http.Request) {
+	if api.favorites == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "收藏夹订阅服务未启用"})
+		return
+	}
+	folders, err := api.favorites.Folders(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, folders)
+}
+
+func (api *API) handleGetFavoriteSubscription(w http.ResponseWriter, r *http.Request) {
+	if api.favorites == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "收藏夹订阅服务未启用"})
+		return
+	}
+	sub, err := api.favorites.Subscription()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sub)
+}
+
+func (api *API) handlePutFavoriteSubscription(w http.ResponseWriter, r *http.Request) {
+	if api.favorites == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "收藏夹订阅服务未启用"})
+		return
+	}
+	var req favoriteSubscriptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "请求体格式不正确"})
+		return
+	}
+	sub, err := api.favorites.SaveSubscription(domain.FavoriteSubscription{
+		MediaID: req.MediaID,
+		Title:   req.Title,
+		Enabled: req.Enabled,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sub)
+}
+
+func (api *API) handleRunFavoriteSubscription(w http.ResponseWriter, r *http.Request) {
+	if api.favorites == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "收藏夹订阅服务未启用"})
+		return
+	}
+	if err := api.favorites.RunOnce(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+	sub, err := api.favorites.Subscription()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sub)
+}
+
 func (api *API) handleGetDependencies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.deps.Status())
 }
@@ -549,6 +627,27 @@ func (api *API) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, item.OutputPath)
+}
+
+func (api *API) handleThumbnail(w http.ResponseWriter, r *http.Request) {
+	id := routeID(r)
+	item, err := api.manager.Get(id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	expectedURL := fmt.Sprintf("/api/downloads/%d/thumbnail", id)
+	if item.ThumbnailURL != expectedURL {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "本地封面不存在"})
+		return
+	}
+	thumbnailPath := api.manager.ThumbnailPath(id)
+	if _, err := os.Stat(thumbnailPath); err != nil {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "本地封面不存在"})
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, thumbnailPath)
 }
 
 func (api *API) authMiddleware(next http.Handler) http.Handler {

@@ -1,15 +1,18 @@
 package bilibili
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +22,9 @@ const (
 	qrcodePollURL     = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key="
 	navURL            = "https://api.bilibili.com/x/web-interface/nav"
 	spaceAccInfoURL   = "http://api.bilibili.com/x/space/acc/info"
+	favFolderListURL  = "https://api.bilibili.com/x/v3/fav/folder/created/list"
+	favResourceURL    = "https://api.bilibili.com/x/v3/fav/resource/list"
+	favBatchDelURL    = "https://api.bilibili.com/x/v3/fav/resource/batch-del"
 	userAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0"
 )
 
@@ -79,6 +85,26 @@ type apiResponse[T any] struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    T      `json:"data"`
+}
+
+type FavoriteFolder struct {
+	ID    int64  `json:"id"`
+	Title string `json:"title"`
+}
+
+type FavoriteMedia struct {
+	ID    int64  `json:"id"`
+	Type  int    `json:"type"`
+	Title string `json:"title"`
+	Bvid  string `json:"bvid"`
+}
+
+type favoriteFolderListData struct {
+	List []FavoriteFolder `json:"list"`
+}
+
+type favoriteResourceListData struct {
+	Medias []FavoriteMedia `json:"medias"`
 }
 
 type qrcodeData struct {
@@ -169,15 +195,115 @@ func (c *Client) GetSpaceInfo(ctx context.Context, sessdata string, mid int) (Sp
 	return c.getSpaceInfoURL(ctx, sessdata, mid, spaceAccInfoURL)
 }
 
+func (c *Client) GetFavoriteFolders(ctx context.Context, sessdata string) ([]FavoriteFolder, error) {
+	profile, err := c.CheckLogin(ctx, sessdata)
+	if err != nil {
+		return nil, err
+	}
+	query := url.Values{}
+	query.Set("ps", "20")
+	query.Set("pn", "1")
+	query.Set("up_mid", strconv.Itoa(profile.Mid))
+
+	var resp apiResponse[favoriteFolderListData]
+	if err := c.getJSON(ctx, favFolderListURL+"?"+query.Encode(), sessdata, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Code != 0 {
+		return nil, errors.New(resp.Message)
+	}
+	return resp.Data.List, nil
+}
+
+func (c *Client) GetFavoriteResources(ctx context.Context, sessdata string, mediaID int64) ([]FavoriteMedia, error) {
+	if mediaID <= 0 {
+		return nil, errors.New("缺少 Bilibili 收藏夹 ID")
+	}
+	query := url.Values{}
+	query.Set("pn", "1")
+	query.Set("ps", "40")
+	query.Set("keyword", "")
+	query.Set("order", "mtime")
+	query.Set("type", "0")
+	query.Set("tid", "0")
+	query.Set("platform", "web")
+	query.Set("media_id", strconv.FormatInt(mediaID, 10))
+
+	var resp apiResponse[favoriteResourceListData]
+	if err := c.getJSON(ctx, favResourceURL+"?"+query.Encode(), sessdata, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Code != 0 {
+		return nil, errors.New(resp.Message)
+	}
+	return resp.Data.Medias, nil
+}
+
+func (c *Client) DeleteFavoriteResource(ctx context.Context, sessdata string, biliJct string, mediaID int64, media FavoriteMedia) error {
+	if sessdata == "" || biliJct == "" {
+		return errors.New("缺少 Bilibili 登录凭据")
+	}
+	if mediaID <= 0 || media.ID <= 0 || media.Type <= 0 {
+		return errors.New("Bilibili 收藏资源参数无效")
+	}
+
+	reqBody := &bytes.Buffer{}
+	writer := multipart.NewWriter(reqBody)
+	_ = writer.WriteField("resources", fmt.Sprintf("%d:%d", media.ID, media.Type))
+	_ = writer.WriteField("media_id", strconv.FormatInt(mediaID, 10))
+	_ = writer.WriteField("platform", "web")
+	_ = writer.WriteField("csrf", biliJct)
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, favBatchDelURL, reqBody)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Referer", "https://www.bilibili.com/")
+	req.AddCookie(&http.Cookie{Name: "SESSDATA", Value: sessdata})
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("Bilibili 返回 HTTP %d: %s", res.StatusCode, string(body))
+	}
+	var resp apiResponse[json.RawMessage]
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return err
+	}
+	if resp.Code != 0 {
+		return errors.New(resp.Message)
+	}
+	return nil
+}
+
 func (c *Client) DownloadAvatar(ctx context.Context, avatarURL string, targetPath string) error {
 	if avatarURL == "" {
 		return errors.New("Bilibili 头像地址为空")
+	}
+	return c.DownloadImage(ctx, avatarURL, targetPath)
+}
+
+func (c *Client) DownloadImage(ctx context.Context, imageURL string, targetPath string) error {
+	if imageURL == "" {
+		return errors.New("Bilibili 图片地址为空")
 	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return err
 	}
 
-	req, err := c.newRequest(ctx, avatarURL, "")
+	req, err := c.newRequest(ctx, imageURL, "")
 	if err != nil {
 		return err
 	}
@@ -187,11 +313,11 @@ func (c *Client) DownloadAvatar(ctx context.Context, avatarURL string, targetPat
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("Bilibili 头像返回 HTTP %d", res.StatusCode)
+		return fmt.Errorf("Bilibili 图片返回 HTTP %d", res.StatusCode)
 	}
 	contentType := res.Header.Get("Content-Type")
 	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
-		return fmt.Errorf("Bilibili 头像内容类型无效：%s", contentType)
+		return fmt.Errorf("Bilibili 图片内容类型无效：%s", contentType)
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(targetPath), filepath.Base(targetPath)+".*.tmp")
@@ -208,7 +334,7 @@ func (c *Client) DownloadAvatar(ctx context.Context, avatarURL string, targetPat
 		return err
 	}
 	if written == 0 {
-		return errors.New("Bilibili 头像内容为空")
+		return errors.New("Bilibili 图片内容为空")
 	}
 	if err := tmp.Close(); err != nil {
 		return err

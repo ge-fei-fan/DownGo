@@ -6,6 +6,7 @@ import { DeleteOutlined, FolderOpenOutlined, RedoOutlined } from '@ant-design/ic
 import {
   createDownload,
   deleteDownload,
+  downloadThumbnailURL,
   openDownloadPath,
   retryDownload,
   type DownloadItem,
@@ -174,6 +175,13 @@ function displaySubtitle(item: DownloadItem) {
   return item.sourceUrl
 }
 
+function thumbnailSrc(item: DownloadItem) {
+  if (item.thumbnailUrl === `/api/downloads/${item.id}/thumbnail`) {
+    return downloadThumbnailURL(item.id)
+  }
+  return item.thumbnailUrl
+}
+
 function platformLabel(platform: string) {
   switch (platform) {
     case 'youtube':
@@ -274,7 +282,7 @@ onMounted(() => {
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'video'">
                 <div class="video-cell">
-                  <a-image v-if="record.thumbnailUrl" :width="120" :src="record.thumbnailUrl" :preview="false" />
+                  <a-image v-if="record.thumbnailUrl" :width="120" :src="thumbnailSrc(record)" :preview="false" />
                   <div v-else class="thumb-placeholder">解析中</div>
                   <div>
                     <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
@@ -325,7 +333,7 @@ onMounted(() => {
             <div v-if="activeList.items.length === 0" class="mobile-empty">暂无下载中的任务</div>
             <div v-for="record in activeList.items" :key="record.id" class="mobile-card">
               <div class="mobile-card-top">
-                <a-image v-if="record.thumbnailUrl" :width="96" :src="record.thumbnailUrl" :preview="false" />
+                <a-image v-if="record.thumbnailUrl" :width="96" :src="thumbnailSrc(record)" :preview="false" />
                 <div v-else class="thumb-placeholder mobile-thumb">解析中</div>
                 <div class="mobile-copy">
                   <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
@@ -379,7 +387,7 @@ onMounted(() => {
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'video'">
                 <div class="video-cell">
-                  <a-image v-if="record.thumbnailUrl" :width="120" :src="record.thumbnailUrl" :preview="false" />
+                  <a-image v-if="record.thumbnailUrl" :width="120" :src="thumbnailSrc(record)" :preview="false" />
                   <div v-else class="thumb-placeholder">视频</div>
                   <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
                 </div>
@@ -411,7 +419,7 @@ onMounted(() => {
             <div v-if="completedList.items.length === 0" class="mobile-empty">暂无已完成任务</div>
             <div v-for="record in completedList.items" :key="record.id" class="mobile-card">
               <div class="mobile-card-top">
-                <a-image v-if="record.thumbnailUrl" :width="96" :src="record.thumbnailUrl" :preview="false" />
+                <a-image v-if="record.thumbnailUrl" :width="96" :src="thumbnailSrc(record)" :preview="false" />
                 <div v-else class="thumb-placeholder mobile-thumb">视频</div>
                 <div class="mobile-copy">
                   <div class="video-title"><a-tag :color="platformColor(record.platform)">{{ platformLabel(record.platform) }}</a-tag>{{ displayTitle(record) }}</div>
