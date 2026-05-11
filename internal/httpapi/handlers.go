@@ -66,6 +66,9 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	r.Use(jsonMiddleware)
 
 	r.Post("/api/auth/login", api.handleLogin)
+	r.Get("/api/public/downloads/progress", api.handlePublicProgress)
+	r.Get("/api/public/downloads/completed", api.handlePublicCompleted)
+	r.Post("/api/public/downloads", api.handleCreate)
 
 	r.Group(func(protected chi.Router) {
 		protected.Use(api.authMiddleware)
@@ -544,6 +547,18 @@ func (api *API) handleList(w http.ResponseWriter, r *http.Request) {
 	if view == "" {
 		view = "active"
 	}
+	api.writeDownloadsList(w, r, view)
+}
+
+func (api *API) handlePublicProgress(w http.ResponseWriter, r *http.Request) {
+	api.writeDownloadsList(w, r, "active")
+}
+
+func (api *API) handlePublicCompleted(w http.ResponseWriter, r *http.Request) {
+	api.writeDownloadsList(w, r, "completed")
+}
+
+func (api *API) writeDownloadsList(w http.ResponseWriter, r *http.Request, view string) {
 	page := parseInt(r.URL.Query().Get("page"), 1)
 	pageSize := parseInt(r.URL.Query().Get("pageSize"), 20)
 
@@ -654,11 +669,11 @@ func (api *API) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := extractToken(r)
 		if token == "" {
-			writeJSON(w, http.StatusUnauthorized, jsonResponse{"error": "缺少访问令牌"})
+			writeJSON(w, http.StatusUnauthorized, jsonResponse{"code": "missing_token", "error": "缺少访问令牌"})
 			return
 		}
 		if _, err := api.tokens.Verify(token); err != nil {
-			writeJSON(w, http.StatusUnauthorized, jsonResponse{"error": "访问令牌无效"})
+			writeJSON(w, http.StatusUnauthorized, jsonResponse{"code": "invalid_token", "error": "访问令牌无效"})
 			return
 		}
 		next.ServeHTTP(w, r)

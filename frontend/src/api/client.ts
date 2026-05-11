@@ -164,9 +164,14 @@ type OpenDependencyInstallEventsOptions = {
 }
 
 let token = ''
+let unauthorizedHandler: (() => void) | null = null
 
 export function setToken(next: string) {
   token = next
+}
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler
 }
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
@@ -185,6 +190,9 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
     }
     error.code = body.code
     error.item = body.item
+    if (response.status === 401 && input !== '/api/auth/login') {
+      unauthorizedHandler?.()
+    }
     throw error
   }
 
