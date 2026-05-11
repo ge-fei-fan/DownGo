@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -80,6 +81,110 @@ func TestPublicCreateDownloadDoesNotRequireAuth(t *testing.T) {
 	}
 	if item.ID == 0 || item.SourceURL != "https://www.youtube.com/watch?v=public123" || item.Status != domain.StatusResolving {
 		t.Fatalf("created item = %+v", item)
+	}
+}
+
+func TestPublicDeleteCompletedDownloadDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, store, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	outputPath := filepath.Join(t.TempDir(), "done.mp4")
+	sidecarPath := filepath.Join(filepath.Dir(outputPath), "done.info.json")
+	if err := os.WriteFile(outputPath, []byte("video"), 0o644); err != nil {
+		t.Fatalf("WriteFile(output) error = %v", err)
+	}
+	if err := os.WriteFile(sidecarPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(sidecar) error = %v", err)
+	}
+
+	item, err := store.CreateDownload(domain.DownloadItem{
+		SourceURL:      "https://www.youtube.com/watch?v=done-delete",
+		NormalizedURL:  "https://www.youtube.com/watch?v=done-delete",
+		Platform:       domain.PlatformYouTube,
+		VideoID:        "done-delete",
+		Title:          "Done Delete",
+		OutputFilename: "done.mp4",
+		OutputPath:     outputPath,
+		Status:         domain.StatusCompleted,
+	})
+	if err != nil {
+		t.Fatalf("CreateDownload(completed) error = %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, server.URL+"/api/public/downloads/"+strconv.FormatInt(item.ID, 10), nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE public download error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNoContent)
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("expected output file to be deleted, stat error = %v", err)
+	}
+	if _, err := os.Stat(sidecarPath); !os.IsNotExist(err) {
+		t.Fatalf("expected sidecar file to be deleted, stat error = %v", err)
+	}
+	stored, err := store.GetDownload(item.ID)
+	if err != nil {
+		t.Fatalf("GetDownload() error = %v", err)
+	}
+	if stored.DeletedAt == nil {
+		t.Fatal("expected deleted_at to be set")
+	}
+}
+
+func TestPublicDeleteRejectsUnfinishedDownload(t *testing.T) {
+	t.Parallel()
+
+	server, store, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	outputPath := filepath.Join(t.TempDir(), "active.mp4")
+	if err := os.WriteFile(outputPath, []byte("partial"), 0o644); err != nil {
+		t.Fatalf("WriteFile(output) error = %v", err)
+	}
+	item, err := store.CreateDownload(domain.DownloadItem{
+		SourceURL:      "https://www.youtube.com/watch?v=active-delete",
+		NormalizedURL:  "https://www.youtube.com/watch?v=active-delete",
+		Platform:       domain.PlatformYouTube,
+		VideoID:        "active-delete",
+		Title:          "Active Delete",
+		OutputFilename: "active.mp4",
+		OutputPath:     outputPath,
+		Status:         domain.StatusDownloading,
+	})
+	if err != nil {
+		t.Fatalf("CreateDownload(active) error = %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, server.URL+"/api/public/downloads/"+strconv.FormatInt(item.ID, 10)+"/file", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE public download error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("expected output file to remain, stat error = %v", err)
+	}
+	stored, err := store.GetDownload(item.ID)
+	if err != nil {
+		t.Fatalf("GetDownload() error = %v", err)
+	}
+	if stored.DeletedAt != nil {
+		t.Fatal("expected deleted_at to remain empty")
 	}
 }
 

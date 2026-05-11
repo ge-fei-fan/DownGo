@@ -69,6 +69,8 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	r.Get("/api/public/downloads/progress", api.handlePublicProgress)
 	r.Get("/api/public/downloads/completed", api.handlePublicCompleted)
 	r.Post("/api/public/downloads", api.handleCreate)
+	r.Delete("/api/public/downloads/{id}", api.handlePublicDeleteCompleted)
+	r.Delete("/api/public/downloads/{id}/file", api.handlePublicDeleteCompleted)
 
 	r.Group(func(protected chi.Router) {
 		protected.Use(api.authMiddleware)
@@ -613,6 +615,14 @@ func (api *API) handleRetry(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if err := api.manager.Delete(routeID(r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (api *API) handlePublicDeleteCompleted(w http.ResponseWriter, r *http.Request) {
+	if err := api.manager.DeleteCompleted(routeID(r)); err != nil {
 		writeError(w, err)
 		return
 	}

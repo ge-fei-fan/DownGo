@@ -234,6 +234,17 @@ func (m *Manager) Delete(id int64) error {
 	return nil
 }
 
+func (m *Manager) DeleteCompleted(id int64) error {
+	item, err := m.store.GetDownload(id)
+	if err != nil {
+		return err
+	}
+	if item.Status != domain.StatusCompleted {
+		return errors.New("only completed downloads can be deleted through this endpoint")
+	}
+	return m.Delete(id)
+}
+
 func (m *Manager) List(view string, page int, pageSize int) (domain.PagedDownloads, error) {
 	return m.store.ListDownloads(view, page, pageSize)
 }
