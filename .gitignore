@@ -7,6 +7,8 @@ data/app.db-shm
 data/app.db-wal
 data/logs/
 data/bin/
+data/bilibili/
+data/downloads/
 
 dist/
 web/assets/

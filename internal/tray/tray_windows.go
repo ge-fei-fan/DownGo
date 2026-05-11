@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"syscall"
 	"unsafe"
+
+	"example.com/downgo/internal/util"
 )
 
 func openURL(url string) error {
@@ -13,9 +15,7 @@ func openURL(url string) error {
 }
 
 func openFolder(path string) error {
-	cmd := exec.Command("explorer.exe", path)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Start()
+	return util.OpenFolder(path)
 }
 
 func showError(title, message string) {
