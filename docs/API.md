@@ -720,3 +720,13 @@ $login = Invoke-RestMethod "$base/api/auth/login" -Method Post -ContentType "app
 $headers = @{ Authorization = "Bearer $($login.token)" }
 Invoke-RestMethod "$base/api/downloads?view=active" -Headers $headers
 ```
+
+## Public thumbnail access
+
+`GET /api/public/downloads/completed` returns `thumbnailUrl` as `/api/public/downloads/{id}/thumbnail` when a completed item has a locally cached thumbnail. Remote thumbnail URLs remain unchanged.
+
+```http
+GET /api/public/downloads/{id}/thumbnail
+```
+
+Success response: `200 OK`, returns the image file. Missing, unfinished, or non-cached thumbnails return `404`.

@@ -68,6 +68,7 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	r.Post("/api/auth/login", api.handleLogin)
 	r.Get("/api/public/downloads/progress", api.handlePublicProgress)
 	r.Get("/api/public/downloads/completed", api.handlePublicCompleted)
+	r.Get("/api/public/downloads/{id}/thumbnail", api.handlePublicThumbnail)
 	r.Post("/api/public/downloads", api.handleCreate)
 	r.Delete("/api/public/downloads/{id}", api.handlePublicDeleteCompleted)
 	r.Delete("/api/public/downloads/{id}/file", api.handlePublicDeleteCompleted)
@@ -557,7 +558,16 @@ func (api *API) handlePublicProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) handlePublicCompleted(w http.ResponseWriter, r *http.Request) {
-	api.writeDownloadsList(w, r, "completed")
+	page := parseInt(r.URL.Query().Get("page"), 1)
+	pageSize := parseInt(r.URL.Query().Get("pageSize"), 20)
+
+	result, err := api.manager.List("completed", page, pageSize)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	publicizeCompletedThumbnails(result.Items)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (api *API) writeDownloadsList(w http.ResponseWriter, r *http.Request, view string) {
@@ -629,6 +639,31 @@ func (api *API) handlePublicDeleteCompleted(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (api *API) handlePublicThumbnail(w http.ResponseWriter, r *http.Request) {
+	id := routeID(r)
+	item, err := api.manager.Get(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": err.Error()})
+		return
+	}
+	if item.Status != domain.StatusCompleted {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "thumbnail not found"})
+		return
+	}
+	if item.ThumbnailURL != protectedThumbnailURL(id) {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "thumbnail not found"})
+		return
+	}
+	thumbnailPath := api.manager.ThumbnailPath(id)
+	if _, err := os.Stat(thumbnailPath); err != nil {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "thumbnail not found"})
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Del("Content-Type")
+	http.ServeFile(w, r, thumbnailPath)
+}
+
 func (api *API) handleOpenPath(w http.ResponseWriter, r *http.Request) {
 	id := routeID(r)
 	zap.L().Info("open download path requested", zap.Int64("id", id), zap.String("remoteAddr", r.RemoteAddr))
@@ -661,8 +696,7 @@ func (api *API) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	expectedURL := fmt.Sprintf("/api/downloads/%d/thumbnail", id)
-	if item.ThumbnailURL != expectedURL {
+	if item.ThumbnailURL != protectedThumbnailURL(id) {
 		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "本地封面不存在"})
 		return
 	}
@@ -672,7 +706,24 @@ func (api *API) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Del("Content-Type")
 	http.ServeFile(w, r, thumbnailPath)
+}
+
+func publicizeCompletedThumbnails(items []domain.DownloadItem) {
+	for i := range items {
+		if items[i].ThumbnailURL == protectedThumbnailURL(items[i].ID) {
+			items[i].ThumbnailURL = publicThumbnailURL(items[i].ID)
+		}
+	}
+}
+
+func protectedThumbnailURL(id int64) string {
+	return fmt.Sprintf("/api/downloads/%d/thumbnail", id)
+}
+
+func publicThumbnailURL(id int64) string {
+	return fmt.Sprintf("/api/public/downloads/%d/thumbnail", id)
 }
 
 func (api *API) authMiddleware(next http.Handler) http.Handler {

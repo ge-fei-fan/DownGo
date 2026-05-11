@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,7 +25,7 @@ import (
 func TestPublicDownloadEndpointsDoNotRequireAuth(t *testing.T) {
 	t.Parallel()
 
-	server, store, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	server, store, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
 	defer cleanup()
 
 	if _, err := store.CreateDownload(domain.DownloadItem{
@@ -60,10 +61,130 @@ func TestPublicDownloadEndpointsDoNotRequireAuth(t *testing.T) {
 	}
 }
 
+func TestPublicCompletedListReturnsPublicThumbnailURL(t *testing.T) {
+	t.Parallel()
+
+	server, store, manager, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	item, err := store.CreateDownload(domain.DownloadItem{
+		SourceURL:     "https://www.bilibili.com/video/BV1public",
+		NormalizedURL: "https://www.bilibili.com/video/BV1public",
+		Platform:      domain.PlatformBilibili,
+		VideoID:       "BV1public",
+		Title:         "Public Cover",
+		ThumbnailURL:  protectedThumbnailURL(1),
+		Status:        domain.StatusCompleted,
+	})
+	if err != nil {
+		t.Fatalf("CreateDownload(completed) error = %v", err)
+	}
+	item.ThumbnailURL = protectedThumbnailURL(item.ID)
+	if _, err := store.UpdateMetadata(item.ID, item, domain.StatusCompleted, ""); err != nil {
+		t.Fatalf("UpdateMetadata() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(manager.ThumbnailPath(item.ID)), 0o755); err != nil {
+		t.Fatalf("MkdirAll(thumbnail) error = %v", err)
+	}
+	pngCover := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+	if err := os.WriteFile(manager.ThumbnailPath(item.ID), pngCover, 0o644); err != nil {
+		t.Fatalf("WriteFile(thumbnail) error = %v", err)
+	}
+
+	completed := getPublicDownloads(t, server.URL+"/api/public/downloads/completed?page=1&pageSize=10")
+	if completed.Total != 1 || len(completed.Items) != 1 {
+		t.Fatalf("completed response = %+v", completed)
+	}
+	if completed.Items[0].ThumbnailURL != publicThumbnailURL(item.ID) {
+		t.Fatalf("thumbnailUrl = %q, want %q", completed.Items[0].ThumbnailURL, publicThumbnailURL(item.ID))
+	}
+
+	res, err := http.Get(server.URL + completed.Items[0].ThumbnailURL)
+	if err != nil {
+		t.Fatalf("GET public thumbnail error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if contentType := res.Header.Get("Content-Type"); contentType != "image/png" {
+		t.Fatalf("Content-Type = %q, want image/png", contentType)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(thumbnail) error = %v", err)
+	}
+	if !bytes.Equal(body, pngCover) {
+		t.Fatalf("thumbnail body = %q", body)
+	}
+}
+
+func TestPublicThumbnailOnlyServesCompletedCachedCover(t *testing.T) {
+	t.Parallel()
+
+	server, store, manager, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	active, err := store.CreateDownload(domain.DownloadItem{
+		SourceURL:     "https://www.bilibili.com/video/BV1active",
+		NormalizedURL: "https://www.bilibili.com/video/BV1active",
+		Platform:      domain.PlatformBilibili,
+		VideoID:       "BV1active",
+		Title:         "Active Cover",
+		ThumbnailURL:  protectedThumbnailURL(1),
+		Status:        domain.StatusDownloading,
+	})
+	if err != nil {
+		t.Fatalf("CreateDownload(active) error = %v", err)
+	}
+	active.ThumbnailURL = protectedThumbnailURL(active.ID)
+	if _, err := store.UpdateMetadata(active.ID, active, domain.StatusDownloading, ""); err != nil {
+		t.Fatalf("UpdateMetadata(active) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(manager.ThumbnailPath(active.ID)), 0o755); err != nil {
+		t.Fatalf("MkdirAll(active thumbnail) error = %v", err)
+	}
+	if err := os.WriteFile(manager.ThumbnailPath(active.ID), []byte("active-cover"), 0o644); err != nil {
+		t.Fatalf("WriteFile(active thumbnail) error = %v", err)
+	}
+
+	missing, err := store.CreateDownload(domain.DownloadItem{
+		SourceURL:     "https://www.bilibili.com/video/BV1missing",
+		NormalizedURL: "https://www.bilibili.com/video/BV1missing",
+		Platform:      domain.PlatformBilibili,
+		VideoID:       "BV1missing",
+		Title:         "Missing Cover",
+		ThumbnailURL:  protectedThumbnailURL(2),
+		Status:        domain.StatusCompleted,
+	})
+	if err != nil {
+		t.Fatalf("CreateDownload(missing) error = %v", err)
+	}
+	missing.ThumbnailURL = protectedThumbnailURL(missing.ID)
+	if _, err := store.UpdateMetadata(missing.ID, missing, domain.StatusCompleted, ""); err != nil {
+		t.Fatalf("UpdateMetadata(missing) error = %v", err)
+	}
+
+	for _, url := range []string{
+		server.URL + publicThumbnailURL(active.ID),
+		server.URL + publicThumbnailURL(missing.ID),
+		server.URL + "/api/public/downloads/999999/thumbnail",
+	} {
+		res, err := http.Get(url)
+		if err != nil {
+			t.Fatalf("GET %s error = %v", url, err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d, want %d", url, res.StatusCode, http.StatusNotFound)
+		}
+	}
+}
+
 func TestPublicCreateDownloadDoesNotRequireAuth(t *testing.T) {
 	t.Parallel()
 
-	server, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
 	defer cleanup()
 
 	body := bytes.NewBufferString(`{"url":"https://www.youtube.com/watch?v=public123"}`)
@@ -87,7 +208,7 @@ func TestPublicCreateDownloadDoesNotRequireAuth(t *testing.T) {
 func TestPublicDeleteCompletedDownloadDoesNotRequireAuth(t *testing.T) {
 	t.Parallel()
 
-	server, store, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	server, store, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
 	defer cleanup()
 
 	outputPath := filepath.Join(t.TempDir(), "done.mp4")
@@ -143,7 +264,7 @@ func TestPublicDeleteCompletedDownloadDoesNotRequireAuth(t *testing.T) {
 func TestPublicDeleteRejectsUnfinishedDownload(t *testing.T) {
 	t.Parallel()
 
-	server, store, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	server, store, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
 	defer cleanup()
 
 	outputPath := filepath.Join(t.TempDir(), "active.mp4")
@@ -191,7 +312,7 @@ func TestPublicDeleteRejectsUnfinishedDownload(t *testing.T) {
 func TestProtectedDownloadsStillRequireAuth(t *testing.T) {
 	t.Parallel()
 
-	server, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
 	defer cleanup()
 
 	res, err := http.Get(server.URL + "/api/downloads?view=active")
@@ -222,7 +343,7 @@ func getPublicDownloads(t *testing.T, url string) domain.PagedDownloads {
 	return result
 }
 
-func newPublicAPITestServer(t *testing.T, runner download.Runner) (*httptest.Server, *db.Store, func()) {
+func newPublicAPITestServer(t *testing.T, runner download.Runner) (*httptest.Server, *db.Store, *download.Manager, func()) {
 	t.Helper()
 
 	baseDir := t.TempDir()
@@ -252,7 +373,7 @@ func newPublicAPITestServer(t *testing.T, runner download.Runner) (*httptest.Ser
 	api := NewAPI(baseDir, settings, manager, deps.NewService(baseDir, nil), nil, auth.NewTokenManager("test"))
 	server := httptest.NewServer(NewRouter(api, webui.Assets))
 
-	return server, store, func() {
+	return server, store, manager, func() {
 		server.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
