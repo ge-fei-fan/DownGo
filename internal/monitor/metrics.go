@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 	gopsnet "github.com/shirou/gopsutil/v4/net"
@@ -167,25 +166,10 @@ func (c *GopsutilCollector) collectMemory(ctx context.Context, result *Metrics) 
 }
 
 func (c *GopsutilCollector) collectDisks(ctx context.Context, result *Metrics) {
-	partitions, err := disk.PartitionsWithContext(ctx, false)
-	if err != nil {
-		result.Errors["disks"] = err.Error()
-		return
-	}
-	for _, partition := range partitions {
-		usage, err := disk.UsageWithContext(ctx, partition.Mountpoint)
-		if err != nil {
-			result.Errors["disk:"+partition.Mountpoint] = err.Error()
-			continue
-		}
-		result.Disks = append(result.Disks, DiskStats{
-			Path:        partition.Mountpoint,
-			FSType:      partition.Fstype,
-			TotalBytes:  usage.Total,
-			UsedBytes:   usage.Used,
-			FreeBytes:   usage.Free,
-			UsedPercent: usage.UsedPercent,
-		})
+	items, errorsByGroup := collectPartitionsNative(ctx)
+	result.Disks = items
+	for key, value := range errorsByGroup {
+		result.Errors[key] = value
 	}
 }
 

@@ -30,14 +30,15 @@ import (
 )
 
 type API struct {
-	baseDir   string
-	settings  *config.Service
-	manager   *download.Manager
-	deps      *deps.Service
-	favorites *favorites.Service
-	tokens    *auth.TokenManager
-	monitor   monitor.Collector
-	disks     monitor.DiskProvider
+	baseDir    string
+	settings   *config.Service
+	manager    *download.Manager
+	deps       *deps.Service
+	favorites  *favorites.Service
+	tokens     *auth.TokenManager
+	monitor    monitor.Collector
+	disks      monitor.DiskProvider
+	partitions monitor.PartitionProvider
 }
 
 type loginRequest struct {
@@ -75,6 +76,7 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	r.Get("/api/public/system/metrics", api.handlePublicSystemMetrics)
 	r.Get("/api/public/system/disks", api.handlePublicSystemDisks)
 	r.Get("/api/public/system/disk-temperatures", api.handlePublicDiskTemperatures)
+	r.Get("/api/public/system/partitions", api.handlePublicSystemPartitions)
 	r.Post("/api/public/downloads", api.handleCreate)
 	r.Delete("/api/public/downloads/{id}", api.handlePublicDeleteCompleted)
 	r.Delete("/api/public/downloads/{id}/file", api.handlePublicDeleteCompleted)
@@ -143,19 +145,24 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 
 func NewAPI(baseDir string, settings *config.Service, manager *download.Manager, depsService *deps.Service, favoritesService *favorites.Service, tokens *auth.TokenManager) *API {
 	return &API{
-		baseDir:   baseDir,
-		settings:  settings,
-		manager:   manager,
-		deps:      depsService,
-		favorites: favoritesService,
-		tokens:    tokens,
-		monitor:   monitor.NewCollector(time.Now()),
-		disks:     monitor.NewDiskService(30 * time.Minute),
+		baseDir:    baseDir,
+		settings:   settings,
+		manager:    manager,
+		deps:       depsService,
+		favorites:  favoritesService,
+		tokens:     tokens,
+		monitor:    monitor.NewCollector(time.Now()),
+		disks:      monitor.NewDiskService(30 * time.Minute),
+		partitions: monitor.NewPartitionService(),
 	}
 }
 
 func (api *API) SetDiskProvider(disks monitor.DiskProvider) {
 	api.disks = disks
+}
+
+func (api *API) SetPartitionProvider(partitions monitor.PartitionProvider) {
+	api.partitions = partitions
 }
 
 func (api *API) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -631,6 +638,19 @@ func (api *API) handlePublicDiskTemperatures(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, temperatures)
+}
+
+func (api *API) handlePublicSystemPartitions(w http.ResponseWriter, r *http.Request) {
+	if api.partitions == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "partition metrics are unavailable"})
+		return
+	}
+	partitions, err := api.partitions.Partitions(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, partitions)
 }
 
 func (api *API) writeDownloadsList(w http.ResponseWriter, r *http.Request, view string) {

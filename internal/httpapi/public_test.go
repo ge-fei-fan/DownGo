@@ -353,6 +353,36 @@ func TestPublicDiskTemperaturesDoesNotRequireAuth(t *testing.T) {
 	}
 }
 
+func TestPublicSystemPartitionsDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/partitions")
+	if err != nil {
+		t.Fatalf("GET public partitions error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.PartitionSnapshot
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode partitions error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("partition items = %+v", result.Items)
+	}
+	item := result.Items[0]
+	if item.Path != "F:\\" || item.TotalBytes != 2048 || item.UsedBytes != 1024 || item.FreeBytes != 1024 || item.UsedPercent != 50 {
+		t.Fatalf("partition item = %+v", item)
+	}
+	if result.Errors["partition:X:\\"] != "access denied" {
+		t.Fatalf("errors = %+v", result.Errors)
+	}
+}
+
 func TestPublicCreateDownloadDoesNotRequireAuth(t *testing.T) {
 	t.Parallel()
 
@@ -550,6 +580,7 @@ func newPublicAPITestServerWithMonitor(t *testing.T, runner download.Runner, met
 	api := NewAPI(baseDir, settings, manager, deps.NewService(baseDir, nil), nil, auth.NewTokenManager("test"))
 	api.monitor = metrics
 	api.SetDiskProvider(staticDisks())
+	api.SetPartitionProvider(staticPartitions())
 	server := httptest.NewServer(NewRouter(api, webui.Assets))
 
 	return server, store, manager, func() {
@@ -601,6 +632,32 @@ func (p staticDiskProvider) Disks(ctx context.Context) (monitor.DiskSnapshot, er
 
 func (p staticDiskProvider) DiskTemperatures(ctx context.Context) (monitor.DiskTemperatureSnapshot, error) {
 	return p.temperatures, p.err
+}
+
+type staticPartitionProvider struct {
+	partitions monitor.PartitionSnapshot
+	err        error
+}
+
+func (p staticPartitionProvider) Partitions(ctx context.Context) (monitor.PartitionSnapshot, error) {
+	return p.partitions, p.err
+}
+
+func staticPartitions() staticPartitionProvider {
+	return staticPartitionProvider{
+		partitions: monitor.PartitionSnapshot{
+			Timestamp: time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC),
+			Items: []monitor.DiskStats{{
+				Path:        "F:\\",
+				FSType:      "NTFS",
+				TotalBytes:  2048,
+				UsedBytes:   1024,
+				FreeBytes:   1024,
+				UsedPercent: 50,
+			}},
+			Errors: map[string]string{"partition:X:\\": "access denied"},
+		},
+	}
 }
 
 func staticDisks() staticDiskProvider {

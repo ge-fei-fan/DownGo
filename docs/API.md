@@ -861,6 +861,44 @@ Invoke-RestMethod "$base/api/public/system/disks"
 Invoke-RestMethod "$base/api/public/system/disk-temperatures"
 ```
 
+## Public partition usage
+
+```http
+GET /api/public/system/partitions
+```
+
+No token is required. Returns partitions, drive letters, or mount points with capacity and usage information.
+
+This endpoint is different from `/api/public/system/disks`: `/system/disks` returns physical disks, while `/system/partitions` returns mounted partitions such as `C:\` and `D:\`.
+
+Success response: `200 OK`
+
+```json
+{
+  "timestamp": "2026-05-12T10:30:00Z",
+  "items": [
+    {
+      "path": "C:\\",
+      "fstype": "NTFS",
+      "totalBytes": 512110190592,
+      "usedBytes": 301000000000,
+      "freeBytes": 211110190592,
+      "usedPercent": 58.8
+    }
+  ],
+  "errors": {
+    "partition:X:\\": "optional warning or collection error"
+  }
+}
+```
+
+Example:
+
+```powershell
+$base = "http://127.0.0.1:12225"
+Invoke-RestMethod "$base/api/public/system/partitions"
+```
+
 ## Public thumbnail access
 
 `GET /api/public/downloads/completed` returns `thumbnailUrl` as `/api/public/downloads/{id}/thumbnail` when a completed item has a locally cached thumbnail. Remote thumbnail URLs remain unchanged.
