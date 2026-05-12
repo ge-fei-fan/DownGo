@@ -18,6 +18,7 @@ import (
 	"example.com/downgo/internal/download"
 	"example.com/downgo/internal/favorites"
 	"example.com/downgo/internal/httpapi"
+	"example.com/downgo/internal/monitor"
 	"example.com/downgo/internal/util"
 	"example.com/downgo/webui"
 )
@@ -31,6 +32,7 @@ type App struct {
 	password  string
 	manager   *download.Manager
 	favorites *favorites.Service
+	disks     *monitor.DiskService
 	appCtx    context.Context
 	appCancel context.CancelFunc
 
@@ -77,9 +79,12 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 	depsService := deps.NewService(baseDir, nil)
 	favoritesService := favorites.NewService(store, settingsService, manager, nil)
 	tokens := auth.NewTokenManager(baseDir + "|downgo")
-	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, favoritesService, tokens)
-	router := httpapi.NewRouter(api, webui.Assets)
 	appCtx, appCancel := context.WithCancel(context.Background())
+	diskService := monitor.NewDiskService(30 * time.Minute)
+	diskService.Start(appCtx)
+	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, favoritesService, tokens)
+	api.SetDiskProvider(diskService)
+	router := httpapi.NewRouter(api, webui.Assets)
 
 	current := settingsService.Current()
 	httpServer := &http.Server{
@@ -98,6 +103,7 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 		password:  initialPassword,
 		manager:   manager,
 		favorites: favoritesService,
+		disks:     diskService,
 		appCtx:    appCtx,
 		appCancel: appCancel,
 		status:    "未启动",

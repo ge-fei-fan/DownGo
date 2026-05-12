@@ -25,6 +25,7 @@ import (
 	"example.com/downgo/internal/domain"
 	"example.com/downgo/internal/download"
 	"example.com/downgo/internal/favorites"
+	"example.com/downgo/internal/monitor"
 	"example.com/downgo/internal/util"
 )
 
@@ -35,6 +36,8 @@ type API struct {
 	deps      *deps.Service
 	favorites *favorites.Service
 	tokens    *auth.TokenManager
+	monitor   monitor.Collector
+	disks     monitor.DiskProvider
 }
 
 type loginRequest struct {
@@ -69,6 +72,9 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	r.Get("/api/public/downloads/progress", api.handlePublicProgress)
 	r.Get("/api/public/downloads/completed", api.handlePublicCompleted)
 	r.Get("/api/public/downloads/{id}/thumbnail", api.handlePublicThumbnail)
+	r.Get("/api/public/system/metrics", api.handlePublicSystemMetrics)
+	r.Get("/api/public/system/disks", api.handlePublicSystemDisks)
+	r.Get("/api/public/system/disk-temperatures", api.handlePublicDiskTemperatures)
 	r.Post("/api/public/downloads", api.handleCreate)
 	r.Delete("/api/public/downloads/{id}", api.handlePublicDeleteCompleted)
 	r.Delete("/api/public/downloads/{id}/file", api.handlePublicDeleteCompleted)
@@ -114,6 +120,11 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	}
 
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasPrefix(req.URL.Path, "/api/") {
+			writeJSON(w, http.StatusNotFound, jsonResponse{"error": "not found"})
+			return
+		}
+
 		clean := path.Clean(strings.TrimPrefix(req.URL.Path, "/"))
 		if clean != "." && clean != "" {
 			if _, err := fs.Stat(sub, clean); err == nil {
@@ -131,7 +142,20 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 }
 
 func NewAPI(baseDir string, settings *config.Service, manager *download.Manager, depsService *deps.Service, favoritesService *favorites.Service, tokens *auth.TokenManager) *API {
-	return &API{baseDir: baseDir, settings: settings, manager: manager, deps: depsService, favorites: favoritesService, tokens: tokens}
+	return &API{
+		baseDir:   baseDir,
+		settings:  settings,
+		manager:   manager,
+		deps:      depsService,
+		favorites: favoritesService,
+		tokens:    tokens,
+		monitor:   monitor.NewCollector(time.Now()),
+		disks:     monitor.NewDiskService(30 * time.Minute),
+	}
+}
+
+func (api *API) SetDiskProvider(disks monitor.DiskProvider) {
+	api.disks = disks
 }
 
 func (api *API) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -568,6 +592,45 @@ func (api *API) handlePublicCompleted(w http.ResponseWriter, r *http.Request) {
 	}
 	publicizeCompletedThumbnails(result.Items)
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *API) handlePublicSystemMetrics(w http.ResponseWriter, r *http.Request) {
+	if api.monitor == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "system metrics are unavailable"})
+		return
+	}
+	metrics, err := api.monitor.Snapshot(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, metrics)
+}
+
+func (api *API) handlePublicSystemDisks(w http.ResponseWriter, r *http.Request) {
+	if api.disks == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "disk metrics are unavailable"})
+		return
+	}
+	disks, err := api.disks.Disks(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, disks)
+}
+
+func (api *API) handlePublicDiskTemperatures(w http.ResponseWriter, r *http.Request) {
+	if api.disks == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "disk metrics are unavailable"})
+		return
+	}
+	temperatures, err := api.disks.DiskTemperatures(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, temperatures)
 }
 
 func (api *API) writeDownloadsList(w http.ResponseWriter, r *http.Request, view string) {

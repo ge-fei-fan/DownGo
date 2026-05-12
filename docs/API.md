@@ -721,6 +721,112 @@ $headers = @{ Authorization = "Bearer $($login.token)" }
 Invoke-RestMethod "$base/api/downloads?view=active" -Headers $headers
 ```
 
+## Public system metrics
+
+```http
+GET /api/public/system/metrics
+```
+
+No token is required. The endpoint returns a real-time snapshot for polling clients, including CPU, memory, disks, network interfaces, host information, DownGo process runtime stats, and optional per-group `errors`.
+
+Example:
+
+```powershell
+$base = "http://127.0.0.1:12225"
+Invoke-RestMethod "$base/api/public/system/metrics"
+```
+
+## Public disk information
+
+```http
+GET /api/public/system/disks
+```
+
+No token is required. Returns physical disks with cached temperature information and optional per-group `errors`.
+
+This endpoint returns physical disks, not partitions or drive-letter volumes. For example, an NVMe SSD is returned as one disk even if it contains `C:\` and `D:\`.
+
+Success response: `200 OK`
+
+```json
+{
+  "timestamp": "2026-05-12T10:30:00Z",
+  "physicalDisks": [
+    {
+      "deviceId": "0",
+      "friendlyName": "Samsung SSD 980",
+      "serialNumber": "S64...",
+      "mediaType": "SSD",
+      "busType": "NVMe",
+      "healthStatus": "Healthy",
+      "operationalStatus": "OK",
+      "sizeBytes": 1000204886016,
+      "temperatureCelsius": 39,
+      "temperatureUpdatedAt": "2026-05-12T10:00:00Z",
+      "temperatureError": ""
+    }
+  ],
+  "temperatureUpdatedAt": "2026-05-12T10:00:00Z",
+  "nextRefreshAt": "2026-05-12T10:30:00Z",
+  "errors": {
+    "physicalDisks": "optional warning or collection error"
+  }
+}
+```
+
+Field notes:
+
+| Field | Description |
+| --- | --- |
+| `physicalDisks` | Physical disk devices from the server, not partitions |
+| `temperatureCelsius` | Latest cached disk temperature; may be `null` when unsupported |
+| `temperatureUpdatedAt` | Time of the cached temperature sample |
+| `nextRefreshAt` | Next scheduled temperature refresh time |
+| `temperatureError` | Per-disk reason when temperature is unavailable |
+| `errors` | Optional collector warnings/errors; successful groups are still returned |
+
+```http
+GET /api/public/system/disk-temperatures
+```
+
+No token is required. Returns the latest cached disk temperature snapshot. DownGo refreshes disk temperatures in the background every 30 minutes.
+
+Success response: `200 OK`
+
+```json
+{
+  "updatedAt": "2026-05-12T10:00:00Z",
+  "nextRefreshAt": "2026-05-12T10:30:00Z",
+  "items": [
+    {
+      "deviceId": "0",
+      "friendlyName": "Samsung SSD 980",
+      "serialNumber": "S64...",
+      "temperatureCelsius": 39,
+      "temperatureError": "",
+      "updatedAt": "2026-05-12T10:00:00Z"
+    }
+  ],
+  "errors": {
+    "physicalDisks": "optional warning or collection error"
+  }
+}
+```
+
+Temperature behavior:
+
+- DownGo refreshes temperature data once at startup and then every 30 minutes.
+- Querying `/api/public/system/disks` or `/api/public/system/disk-temperatures` does not force a temperature refresh.
+- On Windows, collection uses PowerShell in a hidden window. Devices that do not expose temperature still appear, with `temperatureCelsius: null`.
+
+Example:
+
+```powershell
+$base = "http://127.0.0.1:12225"
+Invoke-RestMethod "$base/api/public/system/disks"
+Invoke-RestMethod "$base/api/public/system/disk-temperatures"
+```
+
 ## Public thumbnail access
 
 `GET /api/public/downloads/completed` returns `thumbnailUrl` as `/api/public/downloads/{id}/thumbnail` when a completed item has a locally cached thumbnail. Remote thumbnail URLs remain unchanged.

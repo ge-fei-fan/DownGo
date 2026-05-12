@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"example.com/downgo/internal/deps"
 	"example.com/downgo/internal/domain"
 	"example.com/downgo/internal/download"
+	"example.com/downgo/internal/monitor"
 	"example.com/downgo/webui"
 )
 
@@ -169,15 +172,178 @@ func TestPublicThumbnailOnlyServesCompletedCachedCover(t *testing.T) {
 		server.URL + publicThumbnailURL(active.ID),
 		server.URL + publicThumbnailURL(missing.ID),
 		server.URL + "/api/public/downloads/999999/thumbnail",
+		server.URL + "/api/public/downloads/999999/thumbnail-bad",
 	} {
 		res, err := http.Get(url)
 		if err != nil {
 			t.Fatalf("GET %s error = %v", url, err)
 		}
+		body, readErr := io.ReadAll(res.Body)
 		res.Body.Close()
+		if readErr != nil {
+			t.Fatalf("ReadAll(%s) error = %v", url, readErr)
+		}
 		if res.StatusCode != http.StatusNotFound {
 			t.Fatalf("GET %s status = %d, want %d", url, res.StatusCode, http.StatusNotFound)
 		}
+		if contentType := res.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+			t.Fatalf("GET %s Content-Type = %q, want application/json", url, contentType)
+		}
+		if bytes.Contains(bytes.ToLower(body), []byte("<html")) {
+			t.Fatalf("GET %s returned HTML fallback: %q", url, body)
+		}
+	}
+}
+
+func TestUnknownAPIPathReturnsJSONNotFrontendFallback(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/not-a-real-route")
+	if err != nil {
+		t.Fatalf("GET unknown API error = %v", err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(unknown API) error = %v", err)
+	}
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+	if contentType := res.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+	if bytes.Contains(bytes.ToLower(body), []byte("<html")) {
+		t.Fatalf("unknown API returned HTML fallback: %q", body)
+	}
+}
+
+func TestPublicSystemMetricsDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/metrics")
+	if err != nil {
+		t.Fatalf("GET public metrics error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.Metrics
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode metrics error = %v", err)
+	}
+	if result.CPU == nil || result.CPU.UsagePercent != 12.5 {
+		t.Fatalf("CPU metrics = %+v", result.CPU)
+	}
+	if result.Memory == nil || result.Memory.TotalBytes != 1024 {
+		t.Fatalf("memory metrics = %+v", result.Memory)
+	}
+	if len(result.Disks) != 1 || result.Disks[0].Path != "F:\\" {
+		t.Fatalf("disks = %+v", result.Disks)
+	}
+	if result.Network == nil || len(result.Network.Interfaces) != 1 {
+		t.Fatalf("network = %+v", result.Network)
+	}
+	if result.Host == nil || result.Host.Hostname != "test-host" {
+		t.Fatalf("host = %+v", result.Host)
+	}
+	if result.Process.PID != 1234 || result.Process.Goroutines != 5 {
+		t.Fatalf("process = %+v", result.Process)
+	}
+	if result.Errors["disk:X:"] != "access denied" {
+		t.Fatalf("errors = %+v", result.Errors)
+	}
+}
+
+func TestPublicSystemMetricsReturnsCollectorError(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServerWithMonitor(
+		t,
+		&publicTestRunner{},
+		staticMonitor{err: errors.New("metrics unavailable")},
+	)
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/metrics")
+	if err != nil {
+		t.Fatalf("GET public metrics error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusInternalServerError)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response = %v", err)
+	}
+	if body["error"] != "metrics unavailable" {
+		t.Fatalf("error response = %+v", body)
+	}
+}
+
+func TestPublicSystemDisksDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disks")
+	if err != nil {
+		t.Fatalf("GET public disks error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.DiskSnapshot
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode disks error = %v", err)
+	}
+	if len(result.PhysicalDisks) != 1 || result.PhysicalDisks[0].DeviceID != "0" {
+		t.Fatalf("physical disks = %+v", result.PhysicalDisks)
+	}
+	if result.PhysicalDisks[0].TemperatureCelsius == nil || *result.PhysicalDisks[0].TemperatureCelsius != 35 {
+		t.Fatalf("physical disk temperature = %+v", result.PhysicalDisks[0])
+	}
+	if result.Errors["physicalDisks"] != "partial warning" {
+		t.Fatalf("errors = %+v", result.Errors)
+	}
+}
+
+func TestPublicDiskTemperaturesDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disk-temperatures")
+	if err != nil {
+		t.Fatalf("GET public disk temperatures error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.DiskTemperatureSnapshot
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode disk temperatures error = %v", err)
+	}
+	if result.UpdatedAt == nil || result.NextRefreshAt == nil {
+		t.Fatalf("temperature timestamps = %+v", result)
+	}
+	if len(result.Items) != 1 || result.Items[0].DeviceID != "0" {
+		t.Fatalf("temperature items = %+v", result.Items)
+	}
+	if result.Items[0].TemperatureCelsius == nil || *result.Items[0].TemperatureCelsius != 35 {
+		t.Fatalf("temperature = %+v", result.Items[0])
 	}
 }
 
@@ -345,6 +511,11 @@ func getPublicDownloads(t *testing.T, url string) domain.PagedDownloads {
 
 func newPublicAPITestServer(t *testing.T, runner download.Runner) (*httptest.Server, *db.Store, *download.Manager, func()) {
 	t.Helper()
+	return newPublicAPITestServerWithMonitor(t, runner, staticMonitor{metrics: testMetrics()})
+}
+
+func newPublicAPITestServerWithMonitor(t *testing.T, runner download.Runner, metrics monitor.Collector) (*httptest.Server, *db.Store, *download.Manager, func()) {
+	t.Helper()
 
 	baseDir := t.TempDir()
 	defaults := config.Defaults(baseDir)
@@ -371,6 +542,8 @@ func newPublicAPITestServer(t *testing.T, runner download.Runner) (*httptest.Ser
 		t.Fatalf("NewManagerWithBaseDir() error = %v", err)
 	}
 	api := NewAPI(baseDir, settings, manager, deps.NewService(baseDir, nil), nil, auth.NewTokenManager("test"))
+	api.monitor = metrics
+	api.SetDiskProvider(staticDisks())
 	server := httptest.NewServer(NewRouter(api, webui.Assets))
 
 	return server, store, manager, func() {
@@ -399,4 +572,114 @@ func (r *publicTestRunner) Inspect(ctx context.Context, settings config.Settings
 func (r *publicTestRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+type staticMonitor struct {
+	metrics monitor.Metrics
+	err     error
+}
+
+func (m staticMonitor) Snapshot(ctx context.Context) (monitor.Metrics, error) {
+	return m.metrics, m.err
+}
+
+type staticDiskProvider struct {
+	disks        monitor.DiskSnapshot
+	temperatures monitor.DiskTemperatureSnapshot
+	err          error
+}
+
+func (p staticDiskProvider) Disks(ctx context.Context) (monitor.DiskSnapshot, error) {
+	return p.disks, p.err
+}
+
+func (p staticDiskProvider) DiskTemperatures(ctx context.Context) (monitor.DiskTemperatureSnapshot, error) {
+	return p.temperatures, p.err
+}
+
+func staticDisks() staticDiskProvider {
+	updatedAt := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	nextRefreshAt := updatedAt.Add(30 * time.Minute)
+	temp := 35
+	temperatures := monitor.DiskTemperatureSnapshot{
+		UpdatedAt:     &updatedAt,
+		NextRefreshAt: &nextRefreshAt,
+		Items: []monitor.DiskTemperatureStats{{
+			DeviceID:           "0",
+			FriendlyName:       "Test SSD",
+			SerialNumber:       "SN123",
+			TemperatureCelsius: &temp,
+			UpdatedAt:          &updatedAt,
+		}},
+	}
+	return staticDiskProvider{
+		disks: monitor.DiskSnapshot{
+			Timestamp:            updatedAt,
+			TemperatureUpdatedAt: &updatedAt,
+			NextRefreshAt:        &nextRefreshAt,
+			PhysicalDisks: []monitor.PhysicalDiskStats{{
+				DeviceID:             "0",
+				FriendlyName:         "Test SSD",
+				SerialNumber:         "SN123",
+				MediaType:            "SSD",
+				BusType:              "NVMe",
+				HealthStatus:         "Healthy",
+				OperationalStatus:    "OK",
+				SizeBytes:            1024,
+				TemperatureCelsius:   &temp,
+				TemperatureUpdatedAt: &updatedAt,
+			}},
+			Errors: map[string]string{"physicalDisks": "partial warning"},
+		},
+		temperatures: temperatures,
+	}
+}
+
+func testMetrics() monitor.Metrics {
+	return monitor.Metrics{
+		Timestamp: time.Date(2026, 5, 12, 10, 30, 0, 0, time.UTC),
+		CPU: &monitor.CPUStats{
+			UsagePercent:  12.5,
+			LogicalCores:  16,
+			PhysicalCores: 8,
+			ModelName:     "Test CPU",
+		},
+		Memory: &monitor.MemoryStats{
+			TotalBytes:     1024,
+			UsedBytes:      512,
+			AvailableBytes: 512,
+			UsedPercent:    50,
+		},
+		Disks: []monitor.DiskStats{{
+			Path:        "F:\\",
+			FSType:      "NTFS",
+			TotalBytes:  2048,
+			UsedBytes:   1024,
+			FreeBytes:   1024,
+			UsedPercent: 50,
+		}},
+		Network: &monitor.NetworkStats{
+			Interfaces: []monitor.NetworkInterfaceStats{{
+				Name:        "Ethernet",
+				BytesSent:   100,
+				BytesRecv:   200,
+				PacketsSent: 3,
+				PacketsRecv: 4,
+			}},
+		},
+		Host: &monitor.HostStats{
+			Hostname:      "test-host",
+			OS:            "windows",
+			Platform:      "windows",
+			UptimeSeconds: 60,
+		},
+		Process: monitor.ProcessStats{
+			PID:           1234,
+			UptimeSeconds: 10,
+			Goroutines:    5,
+			AllocBytes:    4096,
+			SysBytes:      8192,
+		},
+		Errors: map[string]string{"disk:X:": "access denied"},
+	}
 }

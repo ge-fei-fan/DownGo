@@ -2,38 +2,37 @@
 setlocal
 cd /d "%~dp0"
 
+set "OUTPUT_EXE=%CD%\DownGo.exe"
+set "EXIT_CODE=0"
+
 echo [DownGo] Checking build tools...
 where go >nul 2>&1
 if errorlevel 1 (
   echo Error: Go is not installed or not available in PATH.
-  pause
-  exit /b 1
+  goto fail
 )
 
 where npm >nul 2>&1
 if errorlevel 1 (
   echo Error: npm is not installed or not available in PATH.
-  pause
-  exit /b 1
+  goto fail
 )
 
 if not exist "frontend\package.json" (
   echo Error: frontend\package.json was not found.
-  pause
-  exit /b 1
+  goto fail
 )
 
 echo.
 echo [DownGo] Installing frontend dependencies if needed...
 if not exist "frontend\node_modules" (
   pushd frontend
-  npm install
+  call npm install
   if errorlevel 1 (
     popd
     echo.
     echo Error: npm install failed.
-    pause
-    exit /b 1
+    goto fail
   )
   popd
 ) else (
@@ -43,13 +42,12 @@ if not exist "frontend\node_modules" (
 echo.
 echo [DownGo] Building frontend assets...
 pushd frontend
-npm run build
+call npm run build
 if errorlevel 1 (
   popd
   echo.
   echo Error: frontend build failed.
-  pause
-  exit /b 1
+  goto fail
 )
 popd
 
@@ -59,20 +57,39 @@ go test ./...
 if errorlevel 1 (
   echo.
   echo Error: go test failed.
-  pause
-  exit /b 1
+  goto fail
 )
 
 echo.
 echo [DownGo] Building latest DownGo.exe...
-go build -buildvcs=false -ldflags="-H windowsgui" -o DownGo.exe ./cmd/server
+if exist "%OUTPUT_EXE%" del /f /q "%OUTPUT_EXE%"
+go build -buildvcs=false -ldflags="-H windowsgui" -o "%OUTPUT_EXE%" ./cmd/server
 if errorlevel 1 (
   echo.
   echo Error: go build failed.
-  pause
-  exit /b 1
+  goto fail
+)
+
+if not exist "%OUTPUT_EXE%" (
+  echo.
+  echo Error: build command finished, but output file was not found:
+  echo %OUTPUT_EXE%
+  goto fail
 )
 
 echo.
-echo [DownGo] Build completed: %CD%\DownGo.exe
-pause
+echo [DownGo] Build completed:
+echo %OUTPUT_EXE%
+goto done
+
+:fail
+set "EXIT_CODE=1"
+echo.
+echo [DownGo] Build failed. See messages above.
+goto done
+
+:done
+echo.
+echo Press any key to close this window...
+pause >nul
+exit /b %EXIT_CODE%
