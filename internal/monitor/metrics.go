@@ -2,14 +2,17 @@ package monitor
 
 import (
 	"context"
+	stdnet "net"
 	"runtime"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
-	"github.com/shirou/gopsutil/v4/net"
+	gopsnet "github.com/shirou/gopsutil/v4/net"
 )
 
 type Collector interface {
@@ -55,11 +58,22 @@ type NetworkStats struct {
 }
 
 type NetworkInterfaceStats struct {
-	Name        string `json:"name"`
-	BytesSent   uint64 `json:"bytesSent"`
-	BytesRecv   uint64 `json:"bytesRecv"`
-	PacketsSent uint64 `json:"packetsSent"`
-	PacketsRecv uint64 `json:"packetsRecv"`
+	Name         string                `json:"name"`
+	HardwareAddr string                `json:"hardwareAddr"`
+	MTU          int                   `json:"mtu"`
+	Flags        []string              `json:"flags"`
+	IsUp         bool                  `json:"isUp"`
+	IPAddresses  []NetworkAddressStats `json:"ipAddresses"`
+	BytesSent    uint64                `json:"bytesSent"`
+	BytesRecv    uint64                `json:"bytesRecv"`
+	PacketsSent  uint64                `json:"packetsSent"`
+	PacketsRecv  uint64                `json:"packetsRecv"`
+}
+
+type NetworkAddressStats struct {
+	Address string `json:"address"`
+	Family  string `json:"family"`
+	CIDR    string `json:"cidr"`
 }
 
 type HostStats struct {
@@ -176,22 +190,94 @@ func (c *GopsutilCollector) collectDisks(ctx context.Context, result *Metrics) {
 }
 
 func (c *GopsutilCollector) collectNetwork(ctx context.Context, result *Metrics) {
-	counters, err := net.IOCountersWithContext(ctx, true)
+	counters, err := gopsnet.IOCountersWithContext(ctx, true)
 	if err != nil {
 		result.Errors["network"] = err.Error()
+	}
+	interfaces, interfaceErr := gopsnet.InterfacesWithContext(ctx)
+	if interfaceErr != nil {
+		result.Errors["networkInterfaces"] = interfaceErr.Error()
+	}
+	stats := mergeNetworkStats(counters, interfaces)
+	if len(stats.Interfaces) == 0 && err != nil && interfaceErr != nil {
 		return
 	}
-	stats := NetworkStats{Interfaces: make([]NetworkInterfaceStats, 0, len(counters))}
+	result.Network = &stats
+}
+
+func mergeNetworkStats(counters []gopsnet.IOCountersStat, interfaces []gopsnet.InterfaceStat) NetworkStats {
+	byName := map[string]*NetworkInterfaceStats{}
 	for _, counter := range counters {
-		stats.Interfaces = append(stats.Interfaces, NetworkInterfaceStats{
-			Name:        counter.Name,
-			BytesSent:   counter.BytesSent,
-			BytesRecv:   counter.BytesRecv,
-			PacketsSent: counter.PacketsSent,
-			PacketsRecv: counter.PacketsRecv,
+		item := ensureNetworkInterface(byName, counter.Name)
+		item.BytesSent = counter.BytesSent
+		item.BytesRecv = counter.BytesRecv
+		item.PacketsSent = counter.PacketsSent
+		item.PacketsRecv = counter.PacketsRecv
+	}
+	for _, iface := range interfaces {
+		item := ensureNetworkInterface(byName, iface.Name)
+		item.HardwareAddr = iface.HardwareAddr
+		item.MTU = iface.MTU
+		item.Flags = append([]string(nil), iface.Flags...)
+		item.IsUp = hasFlag(iface.Flags, "up")
+		item.IPAddresses = networkAddresses(iface.Addrs)
+	}
+
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	stats := NetworkStats{Interfaces: make([]NetworkInterfaceStats, 0, len(names))}
+	for _, name := range names {
+		stats.Interfaces = append(stats.Interfaces, *byName[name])
+	}
+	return stats
+}
+
+func ensureNetworkInterface(byName map[string]*NetworkInterfaceStats, name string) *NetworkInterfaceStats {
+	if item, ok := byName[name]; ok {
+		return item
+	}
+	item := &NetworkInterfaceStats{Name: name, IPAddresses: []NetworkAddressStats{}}
+	byName[name] = item
+	return item
+}
+
+func networkAddresses(addrs []gopsnet.InterfaceAddr) []NetworkAddressStats {
+	result := make([]NetworkAddressStats, 0, len(addrs))
+	for _, addr := range addrs {
+		ip := stdnet.ParseIP(addr.Addr)
+		if ip == nil {
+			ip, _, _ = stdnet.ParseCIDR(addr.Addr)
+		}
+		address := addr.Addr
+		family := ""
+		if ip != nil {
+			address = ip.String()
+			if ip.To4() != nil {
+				family = "ipv4"
+			} else {
+				family = "ipv6"
+			}
+		}
+		result = append(result, NetworkAddressStats{
+			Address: address,
+			Family:  family,
+			CIDR:    addr.Addr,
 		})
 	}
-	result.Network = &stats
+	return result
+}
+
+func hasFlag(flags []string, target string) bool {
+	for _, flag := range flags {
+		if strings.EqualFold(flag, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *GopsutilCollector) collectHost(ctx context.Context, result *Metrics) {

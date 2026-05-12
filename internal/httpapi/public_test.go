@@ -251,6 +251,12 @@ func TestPublicSystemMetricsDoesNotRequireAuth(t *testing.T) {
 	if result.Network == nil || len(result.Network.Interfaces) != 1 {
 		t.Fatalf("network = %+v", result.Network)
 	}
+	if result.Network.Interfaces[0].HardwareAddr != "00-11-22-33-44-55" || !result.Network.Interfaces[0].IsUp {
+		t.Fatalf("network interface metadata = %+v", result.Network.Interfaces[0])
+	}
+	if len(result.Network.Interfaces[0].IPAddresses) != 2 || result.Network.Interfaces[0].IPAddresses[0].Address != "192.168.1.10" {
+		t.Fatalf("network interface addresses = %+v", result.Network.Interfaces[0].IPAddresses)
+	}
 	if result.Host == nil || result.Host.Hostname != "test-host" {
 		t.Fatalf("host = %+v", result.Host)
 	}
@@ -660,7 +666,15 @@ func testMetrics() monitor.Metrics {
 		}},
 		Network: &monitor.NetworkStats{
 			Interfaces: []monitor.NetworkInterfaceStats{{
-				Name:        "Ethernet",
+				Name:         "Ethernet",
+				HardwareAddr: "00-11-22-33-44-55",
+				MTU:          1500,
+				Flags:        []string{"up", "broadcast", "multicast"},
+				IsUp:         true,
+				IPAddresses: []monitor.NetworkAddressStats{
+					{Address: "192.168.1.10", Family: "ipv4", CIDR: "192.168.1.10/24"},
+					{Address: "fe80::1234", Family: "ipv6", CIDR: "fe80::1234/64"},
+				},
 				BytesSent:   100,
 				BytesRecv:   200,
 				PacketsSent: 3,

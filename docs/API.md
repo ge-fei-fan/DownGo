@@ -729,6 +729,40 @@ GET /api/public/system/metrics
 
 No token is required. The endpoint returns a real-time snapshot for polling clients, including CPU, memory, disks, network interfaces, host information, DownGo process runtime stats, and optional per-group `errors`.
 
+Network interface entries include traffic counters and IP information:
+
+```json
+{
+  "network": {
+    "interfaces": [
+      {
+        "name": "Ethernet",
+        "hardwareAddr": "00-11-22-33-44-55",
+        "mtu": 1500,
+        "flags": ["up", "broadcast", "multicast"],
+        "isUp": true,
+        "ipAddresses": [
+          {
+            "address": "192.168.1.10",
+            "family": "ipv4",
+            "cidr": "192.168.1.10/24"
+          },
+          {
+            "address": "fe80::1234",
+            "family": "ipv6",
+            "cidr": "fe80::1234/64"
+          }
+        ],
+        "bytesSent": 123456,
+        "bytesRecv": 987654,
+        "packetsSent": 100,
+        "packetsRecv": 120
+      }
+    ]
+  }
+}
+```
+
 Example:
 
 ```powershell
