@@ -81,6 +81,8 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 	tokens := auth.NewTokenManager(baseDir + "|downgo")
 	appCtx, appCancel := context.WithCancel(context.Background())
 	diskService := monitor.NewDiskService(30 * time.Minute)
+	diskService.SetSmartctlPath(filepath.Join(baseDir, "data", "bin", "smartctl.exe"))
+	diskService.SetTemperatureHistoryStore(store)
 	diskService.Start(appCtx)
 	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, favoritesService, tokens)
 	api.SetDiskProvider(diskService)

@@ -27,27 +27,29 @@ func TestInstallMissingDownloadsOnlyAbsentFiles(t *testing.T) {
 		switch r.URL.Path {
 		case "/yt-dlp.exe":
 			_, _ = w.Write([]byte("yt-dlp"))
+		case "/smartctl.exe":
+			_, _ = w.Write([]byte("smartctl"))
 		default:
 			t.Fatalf("unexpected download request: %s", r.URL.Path)
 		}
 	}))
 	defer server.Close()
 
-	service := newService(baseDir, server.Client(), server.URL+"/yt-dlp.exe", server.URL+"/ffmpeg.exe")
+	service := newService(baseDir, server.Client(), server.URL+"/yt-dlp.exe", server.URL+"/ffmpeg.exe", server.URL+"/smartctl.exe")
 
 	status := service.InstallMissing(context.Background())
 	if !status.YtDlp.Downloaded || !status.YtDlp.Exists {
 		t.Fatalf("expected yt-dlp to be downloaded, got %+v", status.YtDlp)
 	}
-	if status.Ffmpeg.Downloaded {
-		t.Fatalf("expected ffmpeg to be skipped, got %+v", status.Ffmpeg)
+	if status.Ffmpeg.Downloaded || !status.Smartctl.Downloaded {
+		t.Fatalf("expected ffmpeg skipped and smartctl downloaded, got %+v", status)
 	}
 }
 
 func TestInstallMissingEmitsProgressEvents(t *testing.T) {
 	baseDir := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/yt-dlp.exe" {
+		if r.URL.Path != "/yt-dlp.exe" && r.URL.Path != "/smartctl.exe" {
 			t.Fatalf("unexpected download request: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Length", "10")
@@ -64,7 +66,7 @@ func TestInstallMissingEmitsProgressEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service := newService(baseDir, server.Client(), server.URL+"/yt-dlp.exe", server.URL+"/ffmpeg.exe")
+	service := newService(baseDir, server.Client(), server.URL+"/yt-dlp.exe", server.URL+"/ffmpeg.exe", server.URL+"/smartctl.exe")
 	var events []ProgressEvent
 	status := service.InstallMissingWithProgress(context.Background(), func(event ProgressEvent) {
 		events = append(events, event)
@@ -81,6 +83,9 @@ func TestInstallMissingEmitsProgressEvents(t *testing.T) {
 	}
 	if !hasEvent(events, "yt-dlp.exe", "completed") {
 		t.Fatalf("expected completed event, got %s", formatEvents(events))
+	}
+	if !hasEvent(events, "smartctl.exe", "completed") {
+		t.Fatalf("expected smartctl completed event, got %s", formatEvents(events))
 	}
 	if !slices.ContainsFunc(events, func(event ProgressEvent) bool {
 		return event.Type == "done" && event.Status != nil && event.Status.YtDlp.Exists
@@ -101,8 +106,11 @@ func TestInstallMissingEmitsSkippedEvents(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "ffmpeg.exe"), []byte("existing ffmpeg"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(binDir, "smartctl.exe"), []byte("existing smartctl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	service := newService(baseDir, http.DefaultClient, "http://example.invalid/yt-dlp.exe", "http://example.invalid/ffmpeg.exe")
+	service := newService(baseDir, http.DefaultClient, "http://example.invalid/yt-dlp.exe", "http://example.invalid/ffmpeg.exe", "http://example.invalid/smartctl.exe")
 	var events []ProgressEvent
 	service.InstallMissingWithProgress(context.Background(), func(event ProgressEvent) {
 		events = append(events, event)
@@ -113,6 +121,9 @@ func TestInstallMissingEmitsSkippedEvents(t *testing.T) {
 	}
 	if !hasEvent(events, "ffmpeg.exe", "skipped") {
 		t.Fatalf("expected ffmpeg skipped event, got %s", formatEvents(events))
+	}
+	if !hasEvent(events, "smartctl.exe", "skipped") {
+		t.Fatalf("expected smartctl skipped event, got %s", formatEvents(events))
 	}
 }
 
@@ -137,7 +148,7 @@ func TestInstallMissingReturnsErrorAndCleansTempFile(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service := newService(baseDir, server.Client(), server.URL+"/yt-dlp.exe", server.URL+"/ffmpeg.exe")
+	service := newService(baseDir, server.Client(), server.URL+"/yt-dlp.exe", server.URL+"/ffmpeg.exe", server.URL+"/smartctl.exe")
 
 	status := service.InstallMissing(context.Background())
 	if status.YtDlp.Error == "" {

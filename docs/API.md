@@ -616,6 +616,11 @@ GET /api/tools/dependencies
     "path": "F:\\code2\\DownGo\\data\\bin\\ffmpeg.exe",
     "exists": true,
     "downloaded": false
+  },
+  "smartctl": {
+    "path": "F:\\code2\\DownGo\\data\\bin\\smartctl.exe",
+    "exists": true,
+    "downloaded": false
   }
 }
 ```
@@ -642,6 +647,11 @@ POST /api/tools/dependencies/install
     "ffmpeg": {
       "path": "F:\\code2\\DownGo\\data\\bin\\ffmpeg.exe",
       "exists": true,
+      "downloaded": false
+    },
+    "smartctl": {
+      "path": "F:\\code2\\DownGo\\data\\bin\\smartctl.exe",
+      "exists": false,
       "downloaded": false
     }
   }
@@ -776,9 +786,9 @@ Invoke-RestMethod "$base/api/public/system/metrics"
 GET /api/public/system/disks
 ```
 
-No token is required. Returns physical disks with cached temperature information and optional per-group `errors`.
+No token is required. Returns HDD physical disks with cached temperature information and optional per-group `errors`.
 
-This endpoint returns physical disks, not partitions or drive-letter volumes. For example, an NVMe SSD is returned as one disk even if it contains `C:\` and `D:\`.
+This endpoint returns HDD physical disks, not partitions or drive-letter volumes. SSD, NVMe, and unknown media types are filtered out.
 
 Success response: `200 OK`
 
@@ -788,10 +798,10 @@ Success response: `200 OK`
   "physicalDisks": [
     {
       "deviceId": "0",
-      "friendlyName": "Samsung SSD 980",
+      "friendlyName": "Seagate BarraCuda",
       "serialNumber": "S64...",
-      "mediaType": "SSD",
-      "busType": "NVMe",
+      "mediaType": "HDD",
+      "busType": "SATA",
       "healthStatus": "Healthy",
       "operationalStatus": "OK",
       "sizeBytes": 1000204886016,
@@ -812,7 +822,7 @@ Field notes:
 
 | Field | Description |
 | --- | --- |
-| `physicalDisks` | Physical disk devices from the server, not partitions |
+| `physicalDisks` | HDD physical disk devices from the server, not partitions |
 | `temperatureCelsius` | Latest cached disk temperature; may be `null` when unsupported |
 | `temperatureUpdatedAt` | Time of the cached temperature sample |
 | `nextRefreshAt` | Next scheduled temperature refresh time |
@@ -823,7 +833,7 @@ Field notes:
 GET /api/public/system/disk-temperatures
 ```
 
-No token is required. Returns the latest cached disk temperature snapshot. DownGo refreshes disk temperatures in the background every 30 minutes.
+No token is required. Returns the latest cached HDD temperature snapshot. DownGo refreshes disk temperatures in the background every 30 minutes.
 
 Success response: `200 OK`
 
@@ -834,8 +844,9 @@ Success response: `200 OK`
   "items": [
     {
       "deviceId": "0",
-      "friendlyName": "Samsung SSD 980",
+      "friendlyName": "Seagate BarraCuda",
       "serialNumber": "S64...",
+      "mediaType": "HDD",
       "temperatureCelsius": 39,
       "temperatureError": "",
       "updatedAt": "2026-05-12T10:00:00Z"
@@ -849,9 +860,13 @@ Success response: `200 OK`
 
 Temperature behavior:
 
-- DownGo refreshes temperature data once at startup and then every 30 minutes.
+- DownGo refreshes HDD temperature data once at startup and then every 30 minutes.
 - Querying `/api/public/system/disks` or `/api/public/system/disk-temperatures` does not force a temperature refresh.
-- On Windows, collection uses PowerShell in a hidden window. Devices that do not expose temperature still appear, with `temperatureCelsius: null`.
+- On Windows, collection uses `smartctl.exe` first, then falls back to PowerShell `Get-PhysicalDisk.Temperature`.
+- `smartctl.exe` may return a non-zero exit status even when it prints valid JSON. DownGo still parses that JSON and uses `temperature.current` or SMART attribute `190`/`194` when available.
+- For SMART attribute `190`/`194`, DownGo prefers the first number in `raw.string`, such as `45` from `45 (Min/Max 16/60)`, before falling back to `raw.value`.
+- Only disks with `mediaType: "HDD"` are returned. `SSD`, `NVMe`, `Unspecified`, and empty media types are filtered out.
+- HDD devices that Windows or the disk driver do not expose temperature for still appear, with `temperatureCelsius: null` and `temperatureError: "temperature unavailable from Windows Get-PhysicalDisk"`.
 
 Example:
 
@@ -859,6 +874,90 @@ Example:
 $base = "http://127.0.0.1:12225"
 Invoke-RestMethod "$base/api/public/system/disks"
 Invoke-RestMethod "$base/api/public/system/disk-temperatures"
+```
+
+## Public current disk temperatures
+
+```http
+GET /api/public/system/disk-temperatures/current
+```
+
+No token is required. Collects HDD temperatures immediately, updates the cached temperature snapshot, and writes the sample to temperature history.
+
+Success response: `200 OK`
+
+```json
+{
+  "updatedAt": "2026-05-12T10:00:00Z",
+  "nextRefreshAt": "2026-05-12T10:30:00Z",
+  "items": [
+    {
+      "deviceId": "0",
+      "friendlyName": "Seagate BarraCuda",
+      "serialNumber": "S64...",
+      "mediaType": "HDD",
+      "temperatureCelsius": 39,
+      "temperatureError": "",
+      "updatedAt": "2026-05-12T10:00:00Z"
+    }
+  ],
+  "errors": {
+    "smartctl": "stat F:\\code2\\DownGo\\data\\bin\\smartctl.exe: The system cannot find the file specified.",
+    "smartctl:/dev/sda": "smartctl exited with status but did not report temperature"
+  }
+}
+```
+
+If `smartctl.exe` is missing, the endpoint still returns `200 OK`; the missing-file message is returned in `errors.smartctl`.
+If `smartctl.exe` returns a non-zero exit status but includes usable temperature JSON, the temperature is still returned and no per-device error is added for that disk.
+
+## Public disk temperature history
+
+```http
+GET /api/public/system/disk-temperatures/history
+```
+
+No token is required. Returns historical HDD temperature samples grouped by physical disk. DownGo records one sample per HDD every 30 minutes and keeps the latest 30 days.
+
+Query parameters:
+
+| Name | Required | Description |
+| --- | --- | --- |
+| `from` | No | Start time in RFC3339 format. Defaults to the last 24 hours |
+| `to` | No | End time in RFC3339 format. Defaults to now |
+| `limit` | No | Maximum total samples returned. Defaults to `2000`, max `10000` |
+
+Success response: `200 OK`
+
+```json
+{
+  "from": "2026-05-11T10:00:00Z",
+  "to": "2026-05-12T10:00:00Z",
+  "items": [
+    {
+      "deviceId": "0",
+      "friendlyName": "Seagate BarraCuda",
+      "serialNumber": "ABC123",
+      "mediaType": "HDD",
+      "points": [
+        {
+          "sampledAt": "2026-05-12T09:30:00Z",
+          "temperatureCelsius": 39,
+          "temperatureError": ""
+        }
+      ]
+    }
+  ]
+}
+```
+
+Invalid `from`, `to`, or `limit` values return `400`.
+
+Example:
+
+```powershell
+$base = "http://127.0.0.1:12225"
+Invoke-RestMethod "$base/api/public/system/disk-temperatures/history?from=2026-05-11T10:00:00Z&to=2026-05-12T10:00:00Z"
 ```
 
 ## Public partition usage

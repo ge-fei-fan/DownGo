@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	defaultYtDlpURL  = "http://8.210.7.201:22222/pd/1/yt-dlp.exe"
-	defaultFfmpegURL = "http://8.210.7.201:22222/pd/1/ffmpeg.exe"
+	defaultYtDlpURL    = "http://8.210.7.201:22222/pd/1/yt-dlp.exe"
+	defaultFfmpegURL   = "http://8.210.7.201:22222/pd/1/ffmpeg.exe"
+	defaultSmartctlURL = "http://8.210.7.201:22222/pd/1/smartctl.exe"
 )
 
 type FileStatus struct {
@@ -27,9 +28,10 @@ type FileStatus struct {
 }
 
 type Status struct {
-	BinDir string     `json:"binDir"`
-	YtDlp  FileStatus `json:"ytDlp"`
-	Ffmpeg FileStatus `json:"ffmpeg"`
+	BinDir   string     `json:"binDir"`
+	YtDlp    FileStatus `json:"ytDlp"`
+	Ffmpeg   FileStatus `json:"ffmpeg"`
+	Smartctl FileStatus `json:"smartctl"`
 }
 
 type ProgressEvent struct {
@@ -59,8 +61,10 @@ type Service struct {
 	binDir             string
 	ytDlpPath          string
 	ffmpegPath         string
+	smartctlPath       string
 	ytDlpURL           string
 	ffmpegURL          string
+	smartctlURL        string
 	installing         bool
 	installEvents      map[string]ProgressEvent
 	installStatus      Status
@@ -69,10 +73,10 @@ type Service struct {
 }
 
 func NewService(baseDir string, client *http.Client) *Service {
-	return newService(baseDir, client, defaultYtDlpURL, defaultFfmpegURL)
+	return newService(baseDir, client, defaultYtDlpURL, defaultFfmpegURL, defaultSmartctlURL)
 }
 
-func newService(baseDir string, client *http.Client, ytDlpURL, ffmpegURL string) *Service {
+func newService(baseDir string, client *http.Client, ytDlpURL, ffmpegURL, smartctlURL string) *Service {
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
@@ -83,8 +87,10 @@ func newService(baseDir string, client *http.Client, ytDlpURL, ffmpegURL string)
 		binDir:             filepath.Dir(defaults.YtDlpPath),
 		ytDlpPath:          defaults.YtDlpPath,
 		ffmpegPath:         defaults.FfmpegPath,
+		smartctlPath:       filepath.Join(filepath.Dir(defaults.YtDlpPath), "smartctl.exe"),
 		ytDlpURL:           ytDlpURL,
 		ffmpegURL:          ffmpegURL,
+		smartctlURL:        smartctlURL,
 		installEvents:      map[string]ProgressEvent{},
 		installSubscribers: map[chan ProgressEvent]struct{}{},
 	}
@@ -102,6 +108,10 @@ func (s *Service) Status() Status {
 		Ffmpeg: FileStatus{
 			Path:   s.ffmpegPath,
 			Exists: util.FileExists(s.ffmpegPath),
+		},
+		Smartctl: FileStatus{
+			Path:   s.smartctlPath,
+			Exists: util.FileExists(s.smartctlPath),
 		},
 	}
 }
@@ -178,6 +188,13 @@ func (s *Service) InstallMissingWithProgress(ctx context.Context, emit ProgressE
 		status.Ffmpeg.Downloaded = status.Ffmpeg.Error == "" && status.Ffmpeg.Exists
 	} else {
 		emitProgress(emit, ProgressEvent{Type: "skipped", Name: "ffmpeg.exe", Path: s.ffmpegPath})
+	}
+	if !status.Smartctl.Exists {
+		status.Smartctl.Error = s.download(ctx, "smartctl.exe", s.smartctlURL, s.smartctlPath, emit)
+		status.Smartctl.Exists = util.FileExists(s.smartctlPath)
+		status.Smartctl.Downloaded = status.Smartctl.Error == "" && status.Smartctl.Exists
+	} else {
+		emitProgress(emit, ProgressEvent{Type: "skipped", Name: "smartctl.exe", Path: s.smartctlPath})
 	}
 	emitProgress(emit, ProgressEvent{Type: "done", Status: &status})
 	return status

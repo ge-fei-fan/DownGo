@@ -27,12 +27,13 @@ export const useDepsStore = defineStore('deps', () => {
     return [
       { key: 'yt-dlp', label: 'yt-dlp.exe', value: dependencies.value.ytDlp },
       { key: 'ffmpeg', label: 'ffmpeg.exe', value: dependencies.value.ffmpeg },
+      { key: 'smartctl', label: 'smartctl.exe', value: dependencies.value.smartctl },
     ]
   })
 
   const allInstalled = computed(() => {
     if (!dependencies.value) return false
-    return dependencies.value.ytDlp.exists && dependencies.value.ffmpeg.exists
+    return dependencies.value.ytDlp.exists && dependencies.value.ffmpeg.exists && dependencies.value.smartctl.exists
   })
 
   async function check() {
@@ -53,6 +54,7 @@ export const useDepsStore = defineStore('deps', () => {
     const resultItems = [
       ['yt-dlp.exe', result.ytDlp],
       ['ffmpeg.exe', result.ffmpeg],
+      ['smartctl.exe', result.smartctl],
     ] as const
 
     for (const [name, item] of resultItems) {

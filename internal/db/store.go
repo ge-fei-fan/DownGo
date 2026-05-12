@@ -41,6 +41,9 @@ func Open(baseDir string) (*Store, error) {
 	if err := ensureDownloadColumns(conn); err != nil {
 		return nil, err
 	}
+	if err := ensureDiskTemperatureColumns(conn); err != nil {
+		return nil, err
+	}
 	if err := ensureDownloadIndexes(conn); err != nil {
 		return nil, err
 	}
@@ -515,6 +518,22 @@ func ensureDownloadColumns(conn *sql.DB) error {
 	statements := []string{
 		`ALTER TABLE downloads ADD COLUMN quality_label TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE downloads ADD COLUMN container TEXT NOT NULL DEFAULT ''`,
+	}
+
+	for _, statement := range statements {
+		if _, err := conn.Exec(statement); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureDiskTemperatureColumns(conn *sql.DB) error {
+	statements := []string{
+		`ALTER TABLE disk_temperature_samples ADD COLUMN media_type TEXT NOT NULL DEFAULT ''`,
 	}
 
 	for _, statement := range statements {

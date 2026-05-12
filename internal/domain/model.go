@@ -94,3 +94,13 @@ type FavoriteOrigin struct {
 	Bvid         string
 	Title        string
 }
+
+type DiskTemperatureSample struct {
+	DeviceID           string
+	FriendlyName       string
+	SerialNumber       string
+	MediaType          string
+	TemperatureCelsius *int
+	TemperatureError   string
+	SampledAt          time.Time
+}

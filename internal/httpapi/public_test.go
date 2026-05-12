@@ -353,6 +353,74 @@ func TestPublicDiskTemperaturesDoesNotRequireAuth(t *testing.T) {
 	}
 }
 
+func TestPublicCurrentDiskTemperaturesDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disk-temperatures/current")
+	if err != nil {
+		t.Fatalf("GET public current disk temperatures error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.DiskTemperatureSnapshot
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode current disk temperatures error = %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].DeviceID != "0" {
+		t.Fatalf("temperature items = %+v", result.Items)
+	}
+	if result.Items[0].TemperatureCelsius == nil || *result.Items[0].TemperatureCelsius != 35 {
+		t.Fatalf("temperature = %+v", result.Items[0])
+	}
+}
+
+func TestPublicDiskTemperatureHistoryDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disk-temperatures/history?from=2026-05-12T09:00:00Z&to=2026-05-12T11:00:00Z&limit=100")
+	if err != nil {
+		t.Fatalf("GET public disk temperature history error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.DiskTemperatureHistorySnapshot
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode disk temperature history error = %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].DeviceID != "0" {
+		t.Fatalf("history items = %+v", result.Items)
+	}
+	if len(result.Items[0].Points) != 1 || result.Items[0].Points[0].TemperatureCelsius == nil || *result.Items[0].Points[0].TemperatureCelsius != 35 {
+		t.Fatalf("history points = %+v", result.Items[0].Points)
+	}
+}
+
+func TestPublicDiskTemperatureHistoryRejectsInvalidQuery(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disk-temperatures/history?from=bad-time")
+	if err != nil {
+		t.Fatalf("GET public disk temperature history error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+}
+
 func TestPublicSystemPartitionsDoesNotRequireAuth(t *testing.T) {
 	t.Parallel()
 
@@ -623,6 +691,7 @@ func (m staticMonitor) Snapshot(ctx context.Context) (monitor.Metrics, error) {
 type staticDiskProvider struct {
 	disks        monitor.DiskSnapshot
 	temperatures monitor.DiskTemperatureSnapshot
+	history      monitor.DiskTemperatureHistorySnapshot
 	err          error
 }
 
@@ -632,6 +701,14 @@ func (p staticDiskProvider) Disks(ctx context.Context) (monitor.DiskSnapshot, er
 
 func (p staticDiskProvider) DiskTemperatures(ctx context.Context) (monitor.DiskTemperatureSnapshot, error) {
 	return p.temperatures, p.err
+}
+
+func (p staticDiskProvider) RefreshDiskTemperatures(ctx context.Context) (monitor.DiskTemperatureSnapshot, error) {
+	return p.temperatures, p.err
+}
+
+func (p staticDiskProvider) DiskTemperatureHistory(ctx context.Context, from time.Time, to time.Time, limit int) (monitor.DiskTemperatureHistorySnapshot, error) {
+	return p.history, p.err
 }
 
 type staticPartitionProvider struct {
@@ -669,10 +746,25 @@ func staticDisks() staticDiskProvider {
 		NextRefreshAt: &nextRefreshAt,
 		Items: []monitor.DiskTemperatureStats{{
 			DeviceID:           "0",
-			FriendlyName:       "Test SSD",
+			FriendlyName:       "Test HDD",
 			SerialNumber:       "SN123",
+			MediaType:          "HDD",
 			TemperatureCelsius: &temp,
 			UpdatedAt:          &updatedAt,
+		}},
+	}
+	history := monitor.DiskTemperatureHistorySnapshot{
+		From: updatedAt.Add(-time.Hour),
+		To:   updatedAt.Add(time.Hour),
+		Items: []monitor.DiskTemperatureHistoryDiskStats{{
+			DeviceID:     "0",
+			FriendlyName: "Test HDD",
+			SerialNumber: "SN123",
+			MediaType:    "HDD",
+			Points: []monitor.DiskTemperatureHistoryPoint{{
+				SampledAt:          updatedAt,
+				TemperatureCelsius: &temp,
+			}},
 		}},
 	}
 	return staticDiskProvider{
@@ -682,10 +774,10 @@ func staticDisks() staticDiskProvider {
 			NextRefreshAt:        &nextRefreshAt,
 			PhysicalDisks: []monitor.PhysicalDiskStats{{
 				DeviceID:             "0",
-				FriendlyName:         "Test SSD",
+				FriendlyName:         "Test HDD",
 				SerialNumber:         "SN123",
-				MediaType:            "SSD",
-				BusType:              "NVMe",
+				MediaType:            "HDD",
+				BusType:              "SATA",
 				HealthStatus:         "Healthy",
 				OperationalStatus:    "OK",
 				SizeBytes:            1024,
@@ -695,6 +787,7 @@ func staticDisks() staticDiskProvider {
 			Errors: map[string]string{"physicalDisks": "partial warning"},
 		},
 		temperatures: temperatures,
+		history:      history,
 	}
 }
 

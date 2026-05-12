@@ -122,6 +122,7 @@ export type DependenciesDTO = {
   binDir: string
   ytDlp: DependencyFileStatus
   ffmpeg: DependencyFileStatus
+  smartctl: DependencyFileStatus
 }
 
 export type DirectorySelectionDTO = {

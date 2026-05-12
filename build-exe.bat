@@ -91,5 +91,5 @@ goto done
 :done
 echo.
 echo Press any key to close this window...
-pause >nul
+::pause >nul
 exit /b %EXIT_CODE%

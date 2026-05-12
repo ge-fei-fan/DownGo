@@ -75,4 +75,21 @@ CREATE TABLE IF NOT EXISTS bilibili_favorite_downloads (
 
 CREATE INDEX IF NOT EXISTS idx_bilibili_favorite_downloads_resource
 ON bilibili_favorite_downloads(media_id, resource_id, resource_type);
+
+CREATE TABLE IF NOT EXISTS disk_temperature_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id TEXT NOT NULL,
+  friendly_name TEXT NOT NULL DEFAULT '',
+  serial_number TEXT NOT NULL DEFAULT '',
+  media_type TEXT NOT NULL DEFAULT '',
+  temperature_celsius INTEGER,
+  temperature_error TEXT NOT NULL DEFAULT '',
+  sampled_at DATETIME NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_disk_temperature_samples_time
+ON disk_temperature_samples(sampled_at);
+
+CREATE INDEX IF NOT EXISTS idx_disk_temperature_samples_disk_time
+ON disk_temperature_samples(device_id, serial_number, sampled_at);
 `

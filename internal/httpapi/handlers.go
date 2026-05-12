@@ -76,6 +76,8 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	r.Get("/api/public/system/metrics", api.handlePublicSystemMetrics)
 	r.Get("/api/public/system/disks", api.handlePublicSystemDisks)
 	r.Get("/api/public/system/disk-temperatures", api.handlePublicDiskTemperatures)
+	r.Get("/api/public/system/disk-temperatures/current", api.handlePublicCurrentDiskTemperatures)
+	r.Get("/api/public/system/disk-temperatures/history", api.handlePublicDiskTemperatureHistory)
 	r.Get("/api/public/system/partitions", api.handlePublicSystemPartitions)
 	r.Post("/api/public/downloads", api.handleCreate)
 	r.Delete("/api/public/downloads/{id}", api.handlePublicDeleteCompleted)
@@ -640,6 +642,70 @@ func (api *API) handlePublicDiskTemperatures(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, temperatures)
 }
 
+func (api *API) handlePublicCurrentDiskTemperatures(w http.ResponseWriter, r *http.Request) {
+	if api.disks == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "disk metrics are unavailable"})
+		return
+	}
+	temperatures, err := api.disks.RefreshDiskTemperatures(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, temperatures)
+}
+
+func (api *API) handlePublicDiskTemperatureHistory(w http.ResponseWriter, r *http.Request) {
+	if api.disks == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "disk metrics are unavailable"})
+		return
+	}
+	now := time.Now().UTC()
+	from := now.Add(-24 * time.Hour)
+	to := now
+	var err error
+	if value := strings.TrimSpace(r.URL.Query().Get("from")); value != "" {
+		from, err = parseAPITime(value)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "invalid from time"})
+			return
+		}
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get("to")); value != "" {
+		to, err = parseAPITime(value)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "invalid to time"})
+			return
+		}
+	}
+	if from.After(to) {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "from must be before to"})
+		return
+	}
+	limit := 2000
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		limit, err = strconv.Atoi(value)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "invalid limit"})
+			return
+		}
+	}
+	if limit <= 0 {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "limit must be positive"})
+		return
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+
+	history, err := api.disks.DiskTemperatureHistory(r.Context(), from, to, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, history)
+}
+
 func (api *API) handlePublicSystemPartitions(w http.ResponseWriter, r *http.Request) {
 	if api.partitions == nil {
 		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "partition metrics are unavailable"})
@@ -663,6 +729,17 @@ func (api *API) writeDownloadsList(w http.ResponseWriter, r *http.Request, view 
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func parseAPITime(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.UTC(), nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed.UTC(), nil
 }
 
 func (api *API) handleEvents(w http.ResponseWriter, r *http.Request) {
