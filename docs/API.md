@@ -876,6 +876,153 @@ Invoke-RestMethod "$base/api/public/system/disks"
 Invoke-RestMethod "$base/api/public/system/disk-temperatures"
 ```
 
+## Public disk SMART information
+
+```http
+GET /api/public/system/disks/smart
+```
+
+No token is required. Returns the latest cached HDD SMART snapshot. DownGo updates this cache during the same background collection cycle used by disk temperatures, once at startup and then every 30 minutes.
+
+This endpoint returns normalized SMART information for all HDD devices only. It does not return the full raw `smartctl` JSON. To query one disk, use `/api/public/system/disks/smart/{serialNumber}`.
+
+Success response: `200 OK`
+
+```json
+{
+  "updatedAt": "2026-05-12T10:00:00Z",
+  "nextRefreshAt": "2026-05-12T10:30:00Z",
+  "items": [
+    {
+      "deviceId": "/dev/sda",
+      "friendlyName": "WDC WD20EZAZ-00L9GB0",
+      "serialNumber": "WD-WX42A805R8V0",
+      "firmwareVersion": "80.00A80",
+      "mediaType": "HDD",
+      "busType": "ATA",
+      "healthStatus": "PASSED",
+      "sizeBytes": 2000398934016,
+      "temperatureCelsius": 35,
+      "powerOnHours": 12345,
+      "powerCycleCount": 67,
+      "attributes": [
+        {
+          "id": 194,
+          "name": "Temperature_Celsius",
+          "value": 65,
+          "worst": 54,
+          "threshold": 0,
+          "rawValue": "35",
+          "rawString": "35 (Min/Max 16/60)"
+        }
+      ]
+    }
+  ],
+  "errors": {
+    "smartctl": "stat F:\\code2\\DownGo\\data\\bin\\smartctl.exe: The system cannot find the file specified."
+  }
+}
+```
+
+Field notes:
+
+| Field | Description |
+| --- | --- |
+| `items` | Cached SMART data for HDD physical disks |
+| `healthStatus` | `PASSED` or `FAILED` when reported by `smartctl` |
+| `temperatureCelsius` | Current SMART temperature when reported |
+| `powerOnHours` | Device power-on hours when reported |
+| `powerCycleCount` | Device power cycle count when reported |
+| `attributes` | ATA SMART attributes with normalized and raw values |
+| `errors` | Optional collector warnings/errors; successful disks are still returned |
+
+Behavior notes:
+
+- Querying this endpoint reads the cached SMART snapshot and does not execute `smartctl.exe` immediately.
+- `/api/public/system/disk-temperatures/current` refreshes the temperature snapshot and also refreshes the cached SMART snapshot.
+- If `smartctl.exe` is missing, the endpoint still returns `200 OK`; the missing-file message is returned in `errors.smartctl`.
+- SSD and NVMe devices are filtered out.
+
+Status codes:
+
+| Status | Description |
+| --- | --- |
+| `200 OK` | Returns the cached SMART list |
+| `500 Internal Server Error` | Disk metrics service is unavailable |
+
+Example:
+
+```powershell
+$base = "http://127.0.0.1:12225"
+Invoke-RestMethod "$base/api/public/system/disks/smart"
+```
+
+## Public single disk SMART information
+
+```http
+GET /api/public/system/disks/smart/{serialNumber}
+```
+
+No token is required. Returns the latest cached SMART information for one HDD, matched by `serialNumber`. Matching ignores leading/trailing spaces and case. This endpoint reads the cache and does not execute `smartctl.exe` immediately.
+
+Path parameters:
+
+| Name | Required | Description |
+| --- | --- | --- |
+| `serialNumber` | Yes | Disk serial number from `/api/public/system/disks/smart`. URL-encode the value if it contains reserved URL characters. |
+
+Success response: `200 OK`
+
+```json
+{
+  "deviceId": "/dev/sda",
+  "friendlyName": "WDC WD20EZAZ-00L9GB0",
+  "serialNumber": "WD-WX42A805R8V0",
+  "firmwareVersion": "80.00A80",
+  "mediaType": "HDD",
+  "busType": "ATA",
+  "healthStatus": "PASSED",
+  "sizeBytes": 2000398934016,
+  "temperatureCelsius": 35,
+  "powerOnHours": 12345,
+  "powerCycleCount": 67,
+  "attributes": [
+    {
+      "id": 194,
+      "name": "Temperature_Celsius",
+      "value": 65,
+      "worst": 54,
+      "threshold": 0,
+      "rawValue": "35",
+      "rawString": "35 (Min/Max 16/60)"
+    }
+  ]
+}
+```
+
+If the serial number is not found in the current SMART cache, the endpoint returns `404 Not Found`:
+
+```json
+{
+  "error": "disk SMART information not found"
+}
+```
+
+Status codes:
+
+| Status | Description |
+| --- | --- |
+| `200 OK` | Returns one cached SMART item |
+| `404 Not Found` | No SMART item in the current cache matches the serial number |
+| `500 Internal Server Error` | Disk metrics service is unavailable |
+
+Example:
+
+```powershell
+$base = "http://127.0.0.1:12225"
+Invoke-RestMethod "$base/api/public/system/disks/smart/WD-WX42A805R8V0"
+```
+
 ## Public current disk temperatures
 
 ```http

@@ -324,6 +324,97 @@ func TestPublicSystemDisksDoesNotRequireAuth(t *testing.T) {
 	}
 }
 
+func TestPublicDiskSMARTDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disks/smart")
+	if err != nil {
+		t.Fatalf("GET public disk SMART error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.DiskSMARTSnapshot
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode disk SMART error = %v", err)
+	}
+	if result.UpdatedAt == nil || result.NextRefreshAt == nil {
+		t.Fatalf("SMART timestamps = %+v", result)
+	}
+	if len(result.Items) != 1 || result.Items[0].DeviceID != "/dev/sda" {
+		t.Fatalf("SMART items = %+v", result.Items)
+	}
+	if result.Items[0].HealthStatus != "PASSED" || len(result.Items[0].Attributes) != 1 {
+		t.Fatalf("SMART item = %+v", result.Items[0])
+	}
+	if result.Items[0].Attributes[0].ID != 194 || result.Items[0].Attributes[0].RawString != "35" {
+		t.Fatalf("SMART attributes = %+v", result.Items[0].Attributes)
+	}
+}
+
+func TestPublicDiskSMARTBySerialDoesNotRequireAuth(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disks/smart/sn123")
+	if err != nil {
+		t.Fatalf("GET public disk SMART by serial error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	var result monitor.DiskSMARTStats
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode disk SMART item error = %v", err)
+	}
+	if result.SerialNumber != "SN123" || result.DeviceID != "/dev/sda" {
+		t.Fatalf("SMART item = %+v", result)
+	}
+	if result.HealthStatus != "PASSED" || len(result.Attributes) != 1 {
+		t.Fatalf("SMART item details = %+v", result)
+	}
+}
+
+func TestPublicDiskSMARTBySerialReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	server, _, _, cleanup := newPublicAPITestServer(t, &publicTestRunner{})
+	defer cleanup()
+
+	res, err := http.Get(server.URL + "/api/public/system/disks/smart/missing")
+	if err != nil {
+		t.Fatalf("GET missing public disk SMART by serial error = %v", err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(missing SMART) error = %v", err)
+	}
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+	if contentType := res.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", contentType)
+	}
+	if bytes.Contains(bytes.ToLower(body), []byte("<html")) {
+		t.Fatalf("missing SMART returned HTML fallback: %q", body)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode missing SMART response = %v", err)
+	}
+	if payload["error"] != "disk SMART information not found" {
+		t.Fatalf("error response = %+v", payload)
+	}
+}
+
 func TestPublicDiskTemperaturesDoesNotRequireAuth(t *testing.T) {
 	t.Parallel()
 
@@ -690,6 +781,7 @@ func (m staticMonitor) Snapshot(ctx context.Context) (monitor.Metrics, error) {
 
 type staticDiskProvider struct {
 	disks        monitor.DiskSnapshot
+	smart        monitor.DiskSMARTSnapshot
 	temperatures monitor.DiskTemperatureSnapshot
 	history      monitor.DiskTemperatureHistorySnapshot
 	err          error
@@ -697,6 +789,20 @@ type staticDiskProvider struct {
 
 func (p staticDiskProvider) Disks(ctx context.Context) (monitor.DiskSnapshot, error) {
 	return p.disks, p.err
+}
+
+func (p staticDiskProvider) DiskSMART(ctx context.Context) (monitor.DiskSMARTSnapshot, error) {
+	return p.smart, p.err
+}
+
+func (p staticDiskProvider) DiskSMARTBySerial(ctx context.Context, serialNumber string) (monitor.DiskSMARTStats, bool, error) {
+	serial := strings.ToLower(strings.TrimSpace(serialNumber))
+	for _, item := range p.smart.Items {
+		if strings.ToLower(strings.TrimSpace(item.SerialNumber)) == serial {
+			return item, true, p.err
+		}
+	}
+	return monitor.DiskSMARTStats{}, false, p.err
 }
 
 func (p staticDiskProvider) DiskTemperatures(ctx context.Context) (monitor.DiskTemperatureSnapshot, error) {
@@ -785,6 +891,27 @@ func staticDisks() staticDiskProvider {
 				TemperatureUpdatedAt: &updatedAt,
 			}},
 			Errors: map[string]string{"physicalDisks": "partial warning"},
+		},
+		smart: monitor.DiskSMARTSnapshot{
+			UpdatedAt:     &updatedAt,
+			NextRefreshAt: &nextRefreshAt,
+			Items: []monitor.DiskSMARTStats{{
+				DeviceID:           "/dev/sda",
+				FriendlyName:       "Test HDD",
+				SerialNumber:       "SN123",
+				FirmwareVersion:    "1.0",
+				MediaType:          "HDD",
+				BusType:            "ATA",
+				HealthStatus:       "PASSED",
+				SizeBytes:          1024,
+				TemperatureCelsius: &temp,
+				Attributes: []monitor.SMARTAttribute{{
+					ID:        194,
+					Name:      "Temperature_Celsius",
+					RawValue:  "35",
+					RawString: "35",
+				}},
+			}},
 		},
 		temperatures: temperatures,
 		history:      history,

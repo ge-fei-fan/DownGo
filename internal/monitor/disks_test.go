@@ -118,6 +118,46 @@ func TestParseSmartctlDiskJSONReturnsTemperatureFromAttributeString(t *testing.T
 	}
 }
 
+func TestParseSmartctlSMARTJSONReturnsNormalizedAttributes(t *testing.T) {
+	t.Parallel()
+
+	item, err := parseSmartctlSMARTJSON([]byte(`{
+		"smartctl":{"version":[7,5],"exit_status":4},
+		"device":{"name":"/dev/sda","protocol":"ATA"},
+		"model_name":"Data HDD",
+		"serial_number":"SN-HDD",
+		"firmware_version":"1A",
+		"rotation_rate":7200,
+		"user_capacity":{"bytes":1000},
+		"smart_status":{"passed":true},
+		"power_on_time":{"hours":12345},
+		"power_cycle_count":67,
+		"temperature":{"current":35},
+		"ata_smart_attributes":{"table":[
+			{"id":9,"name":"Power_On_Hours","value":99,"worst":99,"thresh":0,"raw":{"value":12345,"string":"12345"}},
+			{"id":194,"name":"Temperature_Celsius","value":62,"worst":54,"thresh":0,"raw":{"value":35,"string":"35 (Min/Max 16/60)"}}
+		]}
+	}`))
+	if err != nil {
+		t.Fatalf("parseSmartctlSMARTJSON() error = %v", err)
+	}
+	if item.DeviceID != "/dev/sda" || item.FriendlyName != "Data HDD" || item.SerialNumber != "SN-HDD" {
+		t.Fatalf("SMART identity = %+v", item)
+	}
+	if item.HealthStatus != "PASSED" || item.PowerOnHours == nil || *item.PowerOnHours != 12345 || item.PowerCycleCount == nil || *item.PowerCycleCount != 67 {
+		t.Fatalf("SMART health/power = %+v", item)
+	}
+	if item.TemperatureCelsius == nil || *item.TemperatureCelsius != 35 {
+		t.Fatalf("SMART temperature = %+v", item.TemperatureCelsius)
+	}
+	if len(item.Attributes) != 2 || item.Attributes[1].ID != 194 || item.Attributes[1].RawString != "35 (Min/Max 16/60)" {
+		t.Fatalf("SMART attributes = %+v", item.Attributes)
+	}
+	if item.Attributes[0].Value == nil || *item.Attributes[0].Value != 99 {
+		t.Fatalf("SMART normalized value = %+v", item.Attributes[0])
+	}
+}
+
 func TestMergeSmartctlTemperaturesMatchesBySerial(t *testing.T) {
 	t.Parallel()
 
@@ -206,6 +246,98 @@ func TestDiskServiceRefreshDiskTemperaturesReturnsSnapshotAndUpdatesCache(t *tes
 	}
 	if len(store.samples) != 1 || store.samples[0].TemperatureCelsius == nil || *store.samples[0].TemperatureCelsius != 42 {
 		t.Fatalf("history samples = %+v", store.samples)
+	}
+}
+
+func TestDiskServiceDiskSMARTReturnsCachedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	temp := 41
+	service := NewDiskService(time.Minute)
+	service.smart = DiskSMARTSnapshot{
+		UpdatedAt: ptrTime(time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)),
+		Items: []DiskSMARTStats{{
+			DeviceID:           "/dev/sda",
+			FriendlyName:       "Data HDD",
+			SerialNumber:       "SN",
+			MediaType:          "HDD",
+			TemperatureCelsius: &temp,
+			Attributes: []SMARTAttribute{{
+				ID:        194,
+				Name:      "Temperature_Celsius",
+				RawString: "41",
+			}},
+		}},
+	}
+
+	snapshot, err := service.DiskSMART(context.Background())
+	if err != nil {
+		t.Fatalf("DiskSMART() error = %v", err)
+	}
+	if len(snapshot.Items) != 1 || len(snapshot.Items[0].Attributes) != 1 {
+		t.Fatalf("SMART snapshot = %+v", snapshot)
+	}
+	snapshot.Items[0].Attributes[0].RawString = "mutated"
+	cached, err := service.DiskSMART(context.Background())
+	if err != nil {
+		t.Fatalf("DiskSMART() second error = %v", err)
+	}
+	if cached.Items[0].Attributes[0].RawString != "41" {
+		t.Fatalf("cached snapshot was mutated: %+v", cached)
+	}
+}
+
+func TestDiskServiceDiskSMARTBySerialReturnsCachedItem(t *testing.T) {
+	t.Parallel()
+
+	service := NewDiskService(time.Minute)
+	service.smart = DiskSMARTSnapshot{
+		Items: []DiskSMARTStats{{
+			DeviceID:     "/dev/sda",
+			FriendlyName: "Data HDD",
+			SerialNumber: "SN-ABC",
+			MediaType:    "HDD",
+			Attributes: []SMARTAttribute{{
+				ID:        194,
+				Name:      "Temperature_Celsius",
+				RawString: "41",
+			}},
+		}},
+	}
+
+	item, ok, err := service.DiskSMARTBySerial(context.Background(), " snabc ")
+	if err != nil {
+		t.Fatalf("DiskSMARTBySerial() error = %v", err)
+	}
+	if !ok || item.SerialNumber != "SN-ABC" || len(item.Attributes) != 1 {
+		t.Fatalf("SMART item = %+v, ok = %v", item, ok)
+	}
+	item.Attributes[0].RawString = "mutated"
+	cached, ok, err := service.DiskSMARTBySerial(context.Background(), "SN-ABC")
+	if err != nil {
+		t.Fatalf("DiskSMARTBySerial() second error = %v", err)
+	}
+	if !ok || cached.Attributes[0].RawString != "41" {
+		t.Fatalf("cached SMART item was mutated: %+v, ok = %v", cached, ok)
+	}
+}
+
+func TestDiskServiceDiskSMARTBySerialReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	service := NewDiskService(time.Minute)
+	service.smart = DiskSMARTSnapshot{
+		Items: []DiskSMARTStats{{
+			SerialNumber: "SN-ABC",
+		}},
+	}
+
+	item, ok, err := service.DiskSMARTBySerial(context.Background(), "missing")
+	if err != nil {
+		t.Fatalf("DiskSMARTBySerial() error = %v", err)
+	}
+	if ok || item.SerialNumber != "" {
+		t.Fatalf("SMART item = %+v, ok = %v", item, ok)
 	}
 }
 
@@ -342,6 +474,10 @@ func TestDiskServiceDisksReturnsPhysicalDisksWithCachedTemperatures(t *testing.T
 	if snapshot.TemperatureUpdatedAt == nil || snapshot.NextRefreshAt == nil {
 		t.Fatalf("temperature cache timestamps = %+v", snapshot)
 	}
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
 }
 
 type memoryTemperatureHistoryStore struct {

@@ -75,6 +75,8 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	r.Get("/api/public/downloads/{id}/thumbnail", api.handlePublicThumbnail)
 	r.Get("/api/public/system/metrics", api.handlePublicSystemMetrics)
 	r.Get("/api/public/system/disks", api.handlePublicSystemDisks)
+	r.Get("/api/public/system/disks/smart", api.handlePublicDiskSMART)
+	r.Get("/api/public/system/disks/smart/{serialNumber}", api.handlePublicDiskSMARTBySerial)
 	r.Get("/api/public/system/disk-temperatures", api.handlePublicDiskTemperatures)
 	r.Get("/api/public/system/disk-temperatures/current", api.handlePublicCurrentDiskTemperatures)
 	r.Get("/api/public/system/disk-temperatures/history", api.handlePublicDiskTemperatureHistory)
@@ -627,6 +629,37 @@ func (api *API) handlePublicSystemDisks(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, disks)
+}
+
+func (api *API) handlePublicDiskSMART(w http.ResponseWriter, r *http.Request) {
+	if api.disks == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "disk metrics are unavailable"})
+		return
+	}
+	smart, err := api.disks.DiskSMART(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, smart)
+}
+
+func (api *API) handlePublicDiskSMARTBySerial(w http.ResponseWriter, r *http.Request) {
+	if api.disks == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "disk metrics are unavailable"})
+		return
+	}
+	serialNumber := chi.URLParam(r, "serialNumber")
+	smart, ok, err := api.disks.DiskSMARTBySerial(r.Context(), serialNumber)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "disk SMART information not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, smart)
 }
 
 func (api *API) handlePublicDiskTemperatures(w http.ResponseWriter, r *http.Request) {
