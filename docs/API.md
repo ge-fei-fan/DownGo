@@ -915,7 +915,7 @@ GET /api/public/system/disks
 
 No token is required. Returns HDD physical disks with cached temperature information and optional per-group `errors`.
 
-This endpoint returns HDD physical disks, not partitions or drive-letter volumes. SSD, NVMe, and unknown media types are filtered out.
+This endpoint returns HDD physical disks, not partitions or drive-letter volumes. SSD and NVMe devices are filtered out. Windows disks reported as `Unspecified` are included only when `smartctl` confirms HDD evidence from rotation rate, model metadata, or mechanical-drive SMART attributes.
 
 Success response: `200 OK`
 
@@ -992,7 +992,7 @@ Temperature behavior:
 - On Windows, collection uses `smartctl.exe` first, then falls back to PowerShell `Get-PhysicalDisk.Temperature`.
 - `smartctl.exe` may return a non-zero exit status even when it prints valid JSON. DownGo still parses that JSON and uses `temperature.current` or SMART attribute `190`/`194` when available.
 - For SMART attribute `190`/`194`, DownGo prefers the first number in `raw.string`, such as `45` from `45 (Min/Max 16/60)`, before falling back to `raw.value`.
-- Only disks with `mediaType: "HDD"` are returned. `SSD`, `NVMe`, `Unspecified`, and empty media types are filtered out.
+- Only disks with `mediaType: "HDD"` are returned. `SSD` and `NVMe` media types are filtered out. `Unspecified` or empty media types are returned only when `smartctl` confirms HDD evidence from rotation rate, model metadata, or mechanical-drive SMART attributes.
 - HDD devices that Windows or the disk driver do not expose temperature for still appear, with `temperatureCelsius: null` and `temperatureError: "temperature unavailable from Windows Get-PhysicalDisk"`.
 
 Example:
@@ -1090,13 +1090,13 @@ Invoke-RestMethod "$base/api/public/system/disks/smart"
 GET /api/public/system/disks/smart/{serialNumber}
 ```
 
-No token is required. Returns the latest cached SMART information for one HDD, matched by `serialNumber`. Matching ignores leading/trailing spaces and case. This endpoint reads the cache and does not execute `smartctl.exe` immediately.
+No token is required. Returns SMART information for one HDD. Matching checks the cached SMART serial number first, then device ID and friendly name, using case-insensitive normalized matching. If the first cache lookup misses, the endpoint refreshes the disk temperature and SMART cache once before returning `404`.
 
 Path parameters:
 
 | Name | Required | Description |
 | --- | --- | --- |
-| `serialNumber` | Yes | Disk serial number from `/api/public/system/disks/smart`. URL-encode the value if it contains reserved URL characters. |
+| `serialNumber` | Yes | Disk serial number from `/api/public/system/disks/smart`. Device ID or friendly name also match as fallbacks. URL-encode the value if it contains reserved URL characters. |
 
 Success response: `200 OK`
 
@@ -1127,7 +1127,7 @@ Success response: `200 OK`
 }
 ```
 
-If the serial number is not found in the current SMART cache, the endpoint returns `404 Not Found`:
+If no SMART item matches after the one-time cache refresh, the endpoint returns `404 Not Found`:
 
 ```json
 {
@@ -1139,8 +1139,8 @@ Status codes:
 
 | Status | Description |
 | --- | --- |
-| `200 OK` | Returns one cached SMART item |
-| `404 Not Found` | No SMART item in the current cache matches the serial number |
+| `200 OK` | Returns one SMART item |
+| `404 Not Found` | No SMART item matches the requested serial number, device ID, or friendly name after refresh |
 | `500 Internal Server Error` | Disk metrics service is unavailable |
 
 Example:

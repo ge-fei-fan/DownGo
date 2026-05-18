@@ -869,6 +869,17 @@ func (api *API) handlePublicDiskSMARTBySerial(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if !ok {
+		if _, err := api.disks.RefreshDiskTemperatures(r.Context()); err != nil {
+			writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+			return
+		}
+		smart, ok, err = api.disks.DiskSMARTBySerial(r.Context(), serialNumber)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+			return
+		}
+	}
+	if !ok {
 		writeJSON(w, http.StatusNotFound, jsonResponse{"error": "disk SMART information not found"})
 		return
 	}

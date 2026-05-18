@@ -118,6 +118,65 @@ func TestParseSmartctlDiskJSONReturnsTemperatureFromAttributeString(t *testing.T
 	}
 }
 
+func TestParseSmartctlDiskJSONInfersHDDFromModelFamilyWithoutRotationRate(t *testing.T) {
+	t.Parallel()
+
+	disk, err := parseSmartctlDiskJSON([]byte(`{
+		"device":{"name":"/dev/sde","protocol":"ATA"},
+		"model_family":"Toshiba 3.5\" DT01ACA... Desktop HDD",
+		"model_name":"TOSHIBA DT01ACA100",
+		"serial_number":"3831MANMS",
+		"temperature":{"current":37}
+	}`))
+	if err != nil {
+		t.Fatalf("parseSmartctlDiskJSON() error = %v", err)
+	}
+	if disk.MediaType != "HDD" {
+		t.Fatalf("disk = %+v", disk)
+	}
+}
+
+func TestParseSmartctlDiskJSONInfersHDDFromMechanicalAttributes(t *testing.T) {
+	t.Parallel()
+
+	disk, err := parseSmartctlDiskJSON([]byte(`{
+		"device":{"name":"/dev/sdb","protocol":"ATA"},
+		"model_name":"Generic ATA Disk",
+		"serial_number":"SN-HDD",
+		"ata_smart_attributes":{"table":[
+			{"id":3,"name":"Spin_Up_Time","raw":{"value":8213,"string":"8213"}},
+			{"id":194,"name":"Temperature_Celsius","raw":{"value":39,"string":"39"}}
+		]}
+	}`))
+	if err != nil {
+		t.Fatalf("parseSmartctlDiskJSON() error = %v", err)
+	}
+	if disk.MediaType != "HDD" {
+		t.Fatalf("disk = %+v", disk)
+	}
+}
+
+func TestParseSmartctlDiskJSONKeepsTrimSupportedATASSDAsSSD(t *testing.T) {
+	t.Parallel()
+
+	disk, err := parseSmartctlDiskJSON([]byte(`{
+		"device":{"name":"/dev/sdc","protocol":"ATA"},
+		"model_name":"SATA SSD",
+		"serial_number":"SN-SSD",
+		"trim":{"supported":true},
+		"ata_smart_attributes":{"table":[
+			{"id":9,"name":"Power_On_Hours","raw":{"value":123,"string":"123"}},
+			{"id":194,"name":"Temperature_Celsius","raw":{"value":32,"string":"32"}}
+		]}
+	}`))
+	if err != nil {
+		t.Fatalf("parseSmartctlDiskJSON() error = %v", err)
+	}
+	if disk.MediaType != "SSD" {
+		t.Fatalf("disk = %+v", disk)
+	}
+}
+
 func TestParseSmartctlSMARTJSONReturnsNormalizedAttributes(t *testing.T) {
 	t.Parallel()
 
@@ -179,6 +238,92 @@ func TestMergeSmartctlTemperaturesMatchesBySerial(t *testing.T) {
 	mergeSmartctlTemperatures(disks, smartDisks)
 	if disks[0].TemperatureCelsius == nil || *disks[0].TemperatureCelsius != 36 {
 		t.Fatalf("merged disk = %+v", disks[0])
+	}
+}
+
+func TestFilterConfirmedHDDDisksIncludesSmartctlConfirmedUnspecifiedDisk(t *testing.T) {
+	t.Parallel()
+
+	disks := []PhysicalDiskStats{
+		{
+			DeviceID:     "0",
+			FriendlyName: "Known HDD",
+			SerialNumber: "SN-HDD",
+			MediaType:    "HDD",
+		},
+		{
+			DeviceID:     "1",
+			FriendlyName: "Windows Unknown",
+			SerialNumber: "SN-UNKNOWN-HDD",
+			MediaType:    "Unspecified",
+			BusType:      "SATA",
+		},
+		{
+			DeviceID:     "2",
+			FriendlyName: "NVMe SSD",
+			SerialNumber: "SN-SSD",
+			MediaType:    "SSD",
+			BusType:      "NVMe",
+		},
+	}
+	smartDisks := []PhysicalDiskStats{{
+		DeviceID:           "/dev/sdb",
+		FriendlyName:       "Confirmed HDD",
+		SerialNumber:       "SN-UNKNOWN-HDD",
+		MediaType:          "HDD",
+		BusType:            "ATA",
+		TemperatureCelsius: ptrInt(37),
+	}}
+
+	filtered := filterConfirmedHDDDisks(disks, smartDisks)
+	if len(filtered) != 2 {
+		t.Fatalf("filtered disks = %+v", filtered)
+	}
+	if filtered[1].DeviceID != "1" || filtered[1].MediaType != "HDD" {
+		t.Fatalf("confirmed disk = %+v", filtered[1])
+	}
+	mergeSmartctlTemperatures(filtered, smartDisks)
+	if filtered[1].TemperatureCelsius == nil || *filtered[1].TemperatureCelsius != 37 {
+		t.Fatalf("confirmed disk temperature = %+v", filtered[1])
+	}
+}
+
+func TestFilterConfirmedHDDDisksExcludesUnconfirmedOrSSDUnspecifiedDisk(t *testing.T) {
+	t.Parallel()
+
+	disks := []PhysicalDiskStats{
+		{
+			DeviceID:     "1",
+			FriendlyName: "Windows Unknown SSD",
+			SerialNumber: "SN-UNKNOWN-SSD",
+			MediaType:    "Unspecified",
+			BusType:      "SATA",
+		},
+		{
+			DeviceID:     "2",
+			FriendlyName: "Unmatched Unknown",
+			SerialNumber: "SN-UNMATCHED",
+			MediaType:    "Unspecified",
+			BusType:      "SATA",
+		},
+	}
+	smartDisks := []PhysicalDiskStats{{
+		DeviceID:     "/dev/sdc",
+		FriendlyName: "Confirmed SSD",
+		SerialNumber: "SN-UNKNOWN-SSD",
+		MediaType:    "SSD",
+		BusType:      "ATA",
+	}, {
+		DeviceID:     "/dev/sdd",
+		FriendlyName: "Different HDD",
+		SerialNumber: "SN-DIFFERENT",
+		MediaType:    "HDD",
+		BusType:      "ATA",
+	}}
+
+	filtered := filterConfirmedHDDDisks(disks, smartDisks)
+	if len(filtered) != 0 {
+		t.Fatalf("filtered disks = %+v", filtered)
 	}
 }
 
@@ -319,6 +464,30 @@ func TestDiskServiceDiskSMARTBySerialReturnsCachedItem(t *testing.T) {
 	}
 	if !ok || cached.Attributes[0].RawString != "41" {
 		t.Fatalf("cached SMART item was mutated: %+v, ok = %v", cached, ok)
+	}
+}
+
+func TestDiskServiceDiskSMARTBySerialMatchesDeviceIDAndFriendlyName(t *testing.T) {
+	t.Parallel()
+
+	service := NewDiskService(time.Minute)
+	service.smart = DiskSMARTSnapshot{
+		Items: []DiskSMARTStats{{
+			DeviceID:     "/dev/sda",
+			FriendlyName: "WDC WD20EZAZ-00GGJB0",
+			SerialNumber: "WD-WX42A805R8V0",
+			MediaType:    "HDD",
+		}},
+	}
+
+	for _, query := range []string{"/dev/sda", "wdc-wd20ezaz", "WD WX42A805R8V0"} {
+		item, ok, err := service.DiskSMARTBySerial(context.Background(), query)
+		if err != nil {
+			t.Fatalf("DiskSMARTBySerial(%q) error = %v", query, err)
+		}
+		if !ok || item.SerialNumber != "WD-WX42A805R8V0" {
+			t.Fatalf("DiskSMARTBySerial(%q) = %+v, ok = %v", query, item, ok)
+		}
 	}
 }
 
@@ -477,6 +646,10 @@ func TestDiskServiceDisksReturnsPhysicalDisksWithCachedTemperatures(t *testing.T
 }
 
 func ptrTime(value time.Time) *time.Time {
+	return &value
+}
+
+func ptrInt(value int) *int {
 	return &value
 }
 

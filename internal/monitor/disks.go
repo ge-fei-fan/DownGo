@@ -242,7 +242,7 @@ func (s *DiskService) DiskSMARTBySerial(ctx context.Context, serialNumber string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, item := range s.smart.Items {
-		if normalizeDiskID(item.SerialNumber) == serial {
+		if matchesSMARTQuery(item, serial) {
 			return cloneSMARTStats(item), true, nil
 		}
 	}
@@ -346,10 +346,10 @@ func (s *DiskService) collectHDDDiskData(ctx context.Context) ([]PhysicalDiskSta
 	if errorsByGroup == nil {
 		errorsByGroup = map[string]string{}
 	}
-	physical = filterHDDDisks(physical)
 
 	smartDisks, smartItems, smartErrors := collectSmartctlDiskData(ctx, s.smartctlPath)
 	mergeErrors(errorsByGroup, smartErrors)
+	physical = filterConfirmedHDDDisks(physical, smartDisks)
 	if len(physical) == 0 {
 		return filterLikelyHDDDisks(smartDisks), filterLikelyHDDSMART(smartItems), errorsByGroup
 	}
@@ -362,10 +362,10 @@ func (s *DiskService) collectHDDDiskSMART(ctx context.Context) ([]DiskSMARTStats
 	if errorsByGroup == nil {
 		errorsByGroup = map[string]string{}
 	}
-	physical = filterHDDDisks(physical)
 
-	smartItems, smartErrors := collectSmartctlSMART(ctx, s.smartctlPath)
+	smartDisks, smartItems, smartErrors := collectSmartctlDiskData(ctx, s.smartctlPath)
 	mergeErrors(errorsByGroup, smartErrors)
+	physical = filterConfirmedHDDDisks(physical, smartDisks)
 	if len(physical) == 0 {
 		return filterLikelyHDDSMART(smartItems), errorsByGroup
 	}
@@ -489,11 +489,15 @@ type smartctlJSON struct {
 		Protocol string `json:"protocol"`
 	} `json:"device"`
 	ModelName        string `json:"model_name"`
+	ModelFamily      string `json:"model_family"`
 	SerialNumber     string `json:"serial_number"`
 	FirmwareVersion  string `json:"firmware_version"`
 	RotationRate     any    `json:"rotation_rate"`
 	SolidStateDevice any    `json:"solid_state_device"`
-	UserCapacity     struct {
+	Trim             struct {
+		Supported any `json:"supported"`
+	} `json:"trim"`
+	UserCapacity struct {
 		Bytes any `json:"bytes"`
 	} `json:"user_capacity"`
 	SmartStatus struct {
@@ -527,11 +531,6 @@ type smartctlJSON struct {
 func collectSmartctlDisks(ctx context.Context, smartctlPath string) ([]PhysicalDiskStats, map[string]string) {
 	disks, _, errorsByGroup := collectSmartctlDiskData(ctx, smartctlPath)
 	return disks, errorsByGroup
-}
-
-func collectSmartctlSMART(ctx context.Context, smartctlPath string) ([]DiskSMARTStats, map[string]string) {
-	_, items, errorsByGroup := collectSmartctlDiskData(ctx, smartctlPath)
-	return items, errorsByGroup
 }
 
 func collectSmartctlDiskData(ctx context.Context, smartctlPath string) ([]PhysicalDiskStats, []DiskSMARTStats, map[string]string) {
@@ -726,7 +725,37 @@ func smartctlMediaType(parsed smartctlJSON) string {
 	if strings.EqualFold(parsed.Device.Protocol, "NVMe") {
 		return "SSD"
 	}
+	if boolFromAny(parsed.Trim.Supported) {
+		return "SSD"
+	}
+	if smartctlHasHDDModel(parsed) || smartctlHasMechanicalAttributes(parsed) {
+		return "HDD"
+	}
 	return ""
+}
+
+func smartctlHasHDDModel(parsed smartctlJSON) bool {
+	text := strings.ToLower(parsed.ModelFamily + " " + parsed.ModelName)
+	for _, marker := range []string{"hdd", "hard disk", "hard drive", "desktop hd", "enterprise capacity"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func smartctlHasMechanicalAttributes(parsed smartctlJSON) bool {
+	for _, attr := range parsed.ATASmartAttributes.Table {
+		switch attr.ID {
+		case 3, 4, 10, 193:
+			return true
+		}
+		name := strings.ToLower(attr.Name)
+		if strings.Contains(name, "spin_") || strings.Contains(name, "load_cycle") || strings.Contains(name, "start_stop") {
+			return true
+		}
+	}
+	return false
 }
 
 func isLikelyHDDSMART(item DiskSMARTStats) bool {
@@ -777,26 +806,36 @@ func firstIntPointer(value string) *int {
 
 func mergeSmartctlTemperatures(disks []PhysicalDiskStats, smartDisks []PhysicalDiskStats) {
 	used := map[int]bool{}
+	matches := make([]*PhysicalDiskStats, len(disks))
 	for i := range disks {
-		match := findSmartctlMatch(disks[i], smartDisks, used)
-		if match == nil {
-			if disks[i].TemperatureCelsius == nil && disks[i].TemperatureError == "" {
-				disks[i].TemperatureError = "temperature unavailable from smartctl and Windows Get-PhysicalDisk"
-			}
-			continue
+		matches[i] = findSmartctlIdentityMatch(disks[i], smartDisks, used)
+	}
+	for i := range disks {
+		if matches[i] == nil {
+			matches[i] = findUnusedSmartctlMatch(smartDisks, used)
 		}
-		if match.TemperatureCelsius != nil {
-			disks[i].TemperatureCelsius = match.TemperatureCelsius
-			disks[i].TemperatureError = ""
-			continue
-		}
-		if disks[i].TemperatureCelsius == nil {
-			disks[i].TemperatureError = match.TemperatureError
-		}
+		applySmartctlTemperature(&disks[i], matches[i])
 	}
 }
 
-func findSmartctlMatch(disk PhysicalDiskStats, smartDisks []PhysicalDiskStats, used map[int]bool) *PhysicalDiskStats {
+func applySmartctlTemperature(disk *PhysicalDiskStats, match *PhysicalDiskStats) {
+	if match == nil {
+		if disk.TemperatureCelsius == nil && disk.TemperatureError == "" {
+			disk.TemperatureError = "temperature unavailable from smartctl and Windows Get-PhysicalDisk"
+		}
+		return
+	}
+	if match.TemperatureCelsius != nil {
+		disk.TemperatureCelsius = match.TemperatureCelsius
+		disk.TemperatureError = ""
+		return
+	}
+	if disk.TemperatureCelsius == nil {
+		disk.TemperatureError = match.TemperatureError
+	}
+}
+
+func findSmartctlIdentityMatch(disk PhysicalDiskStats, smartDisks []PhysicalDiskStats, used map[int]bool) *PhysicalDiskStats {
 	serial := normalizeDiskID(disk.SerialNumber)
 	if serial != "" {
 		for i := range smartDisks {
@@ -822,6 +861,10 @@ func findSmartctlMatch(disk PhysicalDiskStats, smartDisks []PhysicalDiskStats, u
 			}
 		}
 	}
+	return nil
+}
+
+func findUnusedSmartctlMatch(smartDisks []PhysicalDiskStats, used map[int]bool) *PhysicalDiskStats {
 	for i := range smartDisks {
 		if !used[i] {
 			used[i] = true
@@ -834,8 +877,15 @@ func findSmartctlMatch(disk PhysicalDiskStats, smartDisks []PhysicalDiskStats, u
 func matchSMARTToPhysicalHDDs(disks []PhysicalDiskStats, smartItems []DiskSMARTStats) []DiskSMARTStats {
 	items := make([]DiskSMARTStats, 0, len(disks))
 	used := map[int]bool{}
-	for _, disk := range disks {
-		match := findSMARTMatch(disk, smartItems, used)
+	matches := make([]*DiskSMARTStats, len(disks))
+	for i := range disks {
+		matches[i] = findSMARTIdentityMatch(disks[i], smartItems, used)
+	}
+	for i, disk := range disks {
+		match := matches[i]
+		if match == nil {
+			match = findUnusedLikelySMARTMatch(smartItems, used)
+		}
 		if match == nil {
 			continue
 		}
@@ -862,7 +912,7 @@ func matchSMARTToPhysicalHDDs(disks []PhysicalDiskStats, smartItems []DiskSMARTS
 	return items
 }
 
-func findSMARTMatch(disk PhysicalDiskStats, smartItems []DiskSMARTStats, used map[int]bool) *DiskSMARTStats {
+func findSMARTIdentityMatch(disk PhysicalDiskStats, smartItems []DiskSMARTStats, used map[int]bool) *DiskSMARTStats {
 	serial := normalizeDiskID(disk.SerialNumber)
 	if serial != "" {
 		for i := range smartItems {
@@ -888,6 +938,10 @@ func findSMARTMatch(disk PhysicalDiskStats, smartItems []DiskSMARTStats, used ma
 			}
 		}
 	}
+	return nil
+}
+
+func findUnusedLikelySMARTMatch(smartItems []DiskSMARTStats, used map[int]bool) *DiskSMARTStats {
 	for i := range smartItems {
 		if !used[i] && isLikelyHDDSMART(smartItems[i]) {
 			used[i] = true
@@ -1125,6 +1179,20 @@ func cloneSMARTStats(item DiskSMARTStats) DiskSMARTStats {
 	return result
 }
 
+func matchesSMARTQuery(item DiskSMARTStats, query string) bool {
+	for _, value := range []string{item.SerialNumber, item.DeviceID} {
+		key := normalizeDiskID(value)
+		if key != "" && key == query {
+			return true
+		}
+	}
+	name := normalizeDiskID(item.FriendlyName)
+	if name != "" && (strings.Contains(name, query) || strings.Contains(query, name)) {
+		return true
+	}
+	return false
+}
+
 func groupDiskTemperatureSamples(samples []DiskTemperatureSample) []DiskTemperatureHistoryDiskStats {
 	items := make([]DiskTemperatureHistoryDiskStats, 0)
 	indexes := map[string]int{}
@@ -1154,12 +1222,23 @@ func groupDiskTemperatureSamples(samples []DiskTemperatureSample) []DiskTemperat
 	return items
 }
 
-func filterHDDDisks(disks []PhysicalDiskStats) []PhysicalDiskStats {
+func filterConfirmedHDDDisks(disks []PhysicalDiskStats, smartDisks []PhysicalDiskStats) []PhysicalDiskStats {
 	items := make([]PhysicalDiskStats, 0, len(disks))
+	usedSmartDisks := map[int]bool{}
 	for _, disk := range disks {
 		if isHDDMediaType(disk.MediaType) {
 			items = append(items, disk)
+			continue
 		}
+		if !isUnknownMediaType(disk.MediaType) {
+			continue
+		}
+		match := findSmartctlIdentityMatch(disk, smartDisks, usedSmartDisks)
+		if match == nil || !isHDDMediaType(match.MediaType) {
+			continue
+		}
+		disk.MediaType = "HDD"
+		items = append(items, disk)
 	}
 	return items
 }
@@ -1179,6 +1258,11 @@ func filterLikelyHDDDisks(disks []PhysicalDiskStats) []PhysicalDiskStats {
 
 func isHDDMediaType(mediaType string) bool {
 	return strings.EqualFold(strings.TrimSpace(mediaType), "HDD")
+}
+
+func isUnknownMediaType(mediaType string) bool {
+	mediaType = strings.TrimSpace(mediaType)
+	return mediaType == "" || strings.EqualFold(mediaType, "Unspecified")
 }
 
 func diskKeys(deviceID string, serialNumber string, friendlyName string) []string {

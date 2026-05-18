@@ -415,6 +415,64 @@ func TestPublicDiskSMARTBySerialReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestPublicDiskSMARTBySerialRefreshesCacheOnMiss(t *testing.T) {
+	t.Parallel()
+
+	provider := &refreshingSMARTProvider{
+		refreshedSmart: monitor.DiskSMARTSnapshot{
+			Items: []monitor.DiskSMARTStats{{
+				DeviceID:     "/dev/sdb",
+				FriendlyName: "Data HDD",
+				SerialNumber: "SN-REFRESH",
+				MediaType:    "HDD",
+			}},
+		},
+	}
+	server := httptest.NewServer(NewRouter(&API{disks: provider}, webui.Assets))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/public/system/disks/smart/snrefresh")
+	if err != nil {
+		t.Fatalf("GET refreshed public disk SMART by serial error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want %d, body = %s", res.StatusCode, http.StatusOK, body)
+	}
+	if provider.refreshCount != 1 {
+		t.Fatalf("refreshCount = %d, want 1", provider.refreshCount)
+	}
+	var result monitor.DiskSMARTStats
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatalf("decode refreshed disk SMART item error = %v", err)
+	}
+	if result.SerialNumber != "SN-REFRESH" {
+		t.Fatalf("SMART item = %+v", result)
+	}
+}
+
+func TestPublicDiskSMARTBySerialReturnsNotFoundAfterRefreshMiss(t *testing.T) {
+	t.Parallel()
+
+	provider := &refreshingSMARTProvider{}
+	server := httptest.NewServer(NewRouter(&API{disks: provider}, webui.Assets))
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/public/system/disks/smart/missing")
+	if err != nil {
+		t.Fatalf("GET missing refreshed public disk SMART by serial error = %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want %d, body = %s", res.StatusCode, http.StatusNotFound, body)
+	}
+	if provider.refreshCount != 1 {
+		t.Fatalf("refreshCount = %d, want 1", provider.refreshCount)
+	}
+}
+
 func TestPublicDiskTemperaturesDoesNotRequireAuth(t *testing.T) {
 	t.Parallel()
 
@@ -815,6 +873,48 @@ func (p staticDiskProvider) RefreshDiskTemperatures(ctx context.Context) (monito
 
 func (p staticDiskProvider) DiskTemperatureHistory(ctx context.Context, from time.Time, to time.Time, limit int) (monitor.DiskTemperatureHistorySnapshot, error) {
 	return p.history, p.err
+}
+
+type refreshingSMARTProvider struct {
+	smart          monitor.DiskSMARTSnapshot
+	refreshedSmart monitor.DiskSMARTSnapshot
+	refreshCount   int
+	err            error
+}
+
+func (p *refreshingSMARTProvider) Disks(ctx context.Context) (monitor.DiskSnapshot, error) {
+	return monitor.DiskSnapshot{}, p.err
+}
+
+func (p *refreshingSMARTProvider) DiskSMART(ctx context.Context) (monitor.DiskSMARTSnapshot, error) {
+	return p.smart, p.err
+}
+
+func (p *refreshingSMARTProvider) DiskSMARTBySerial(ctx context.Context, serialNumber string) (monitor.DiskSMARTStats, bool, error) {
+	query := strings.ToLower(strings.TrimSpace(serialNumber))
+	normalizedQuery := strings.NewReplacer(" ", "", "-", "", "_", "", ".", "").Replace(query)
+	for _, item := range p.smart.Items {
+		serial := strings.ToLower(strings.TrimSpace(item.SerialNumber))
+		normalizedSerial := strings.NewReplacer(" ", "", "-", "", "_", "", ".", "").Replace(serial)
+		if serial == query || normalizedSerial == normalizedQuery {
+			return item, true, p.err
+		}
+	}
+	return monitor.DiskSMARTStats{}, false, p.err
+}
+
+func (p *refreshingSMARTProvider) DiskTemperatures(ctx context.Context) (monitor.DiskTemperatureSnapshot, error) {
+	return monitor.DiskTemperatureSnapshot{}, p.err
+}
+
+func (p *refreshingSMARTProvider) RefreshDiskTemperatures(ctx context.Context) (monitor.DiskTemperatureSnapshot, error) {
+	p.refreshCount++
+	p.smart = p.refreshedSmart
+	return monitor.DiskTemperatureSnapshot{}, p.err
+}
+
+func (p *refreshingSMARTProvider) DiskTemperatureHistory(ctx context.Context, from time.Time, to time.Time, limit int) (monitor.DiskTemperatureHistorySnapshot, error) {
+	return monitor.DiskTemperatureHistorySnapshot{}, p.err
 }
 
 type staticPartitionProvider struct {
