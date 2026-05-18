@@ -80,7 +80,7 @@ func TestHandleThumbnailServesCachedCover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue() error = %v", err)
 	}
-	api := NewAPI(baseDir, settings, manager, deps.NewService(baseDir, nil), nil, tokens)
+	api := NewAPI(baseDir, settings, manager, deps.NewService(baseDir, nil), nil, nil, tokens)
 	server := httptest.NewServer(NewRouter(api, webui.Assets))
 	defer server.Close()
 

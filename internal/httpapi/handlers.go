@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,8 @@ import (
 	"example.com/downgo/internal/download"
 	"example.com/downgo/internal/favorites"
 	"example.com/downgo/internal/monitor"
+	"example.com/downgo/internal/notification"
+	"example.com/downgo/internal/scheduler"
 	"example.com/downgo/internal/util"
 )
 
@@ -35,6 +38,8 @@ type API struct {
 	manager    *download.Manager
 	deps       *deps.Service
 	favorites  *favorites.Service
+	notifier   *notification.Service
+	scheduler  *scheduler.Service
 	tokens     *auth.TokenManager
 	monitor    monitor.Collector
 	disks      monitor.DiskProvider
@@ -59,8 +64,26 @@ type favoriteSubscriptionRequest struct {
 	Enabled bool   `json:"enabled"`
 }
 
+type diskTemperatureNotificationRuleRequest struct {
+	Enabled            bool   `json:"enabled"`
+	ThresholdCelsius   int    `json:"thresholdCelsius"`
+	BarkEnabled        bool   `json:"barkEnabled"`
+	BarkServerURL      string `json:"barkServerUrl"`
+	BarkDeviceKey      string `json:"barkDeviceKey"`
+	ClearBarkDeviceKey bool   `json:"clearBarkDeviceKey"`
+}
+
+type scheduledTaskRequest struct {
+	Enabled         bool `json:"enabled"`
+	IntervalMinutes int  `json:"intervalMinutes"`
+}
+
 type selectDownloadDirRequest struct {
 	CurrentDir string `json:"currentDir"`
+}
+
+type selectFileRequest struct {
+	CurrentPath string `json:"currentPath"`
 }
 
 type jsonResponse map[string]any
@@ -90,6 +113,7 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 		protected.Get("/api/settings", api.handleGetSettings)
 		protected.Put("/api/settings", api.handlePutSettings)
 		protected.Post("/api/settings/download-dir/select", api.handleSelectDownloadDir)
+		protected.Post("/api/settings/yt-dlp-cookie/select", api.handleSelectYtDlpCookie)
 		protected.Post("/api/bilibili/qrcode", api.handleBilibiliQRCode)
 		protected.Get("/api/bilibili/qrcode/poll", api.handleBilibiliQRCodePoll)
 		protected.Get("/api/bilibili/session", api.handleBilibiliSession)
@@ -100,6 +124,12 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 		protected.Get("/api/bilibili/favorites/subscription", api.handleGetFavoriteSubscription)
 		protected.Put("/api/bilibili/favorites/subscription", api.handlePutFavoriteSubscription)
 		protected.Post("/api/bilibili/favorites/subscription/run", api.handleRunFavoriteSubscription)
+		protected.Get("/api/notifications/rules", api.handleListNotificationRules)
+		protected.Put("/api/notifications/rules/disk-temperature", api.handleUpdateDiskTemperatureNotificationRule)
+		protected.Post("/api/notifications/rules/disk-temperature/test", api.handleTestDiskTemperatureNotificationRule)
+		protected.Get("/api/notifications", api.handleListNotifications)
+		protected.Get("/api/scheduled-tasks", api.handleListScheduledTasks)
+		protected.Put("/api/scheduled-tasks/{id}", api.handleUpdateScheduledTask)
 		protected.Get("/api/tools/dependencies", api.handleGetDependencies)
 		protected.Post("/api/tools/dependencies/install", api.handleInstallDependencies)
 		protected.Get("/api/tools/dependencies/install/status", api.handleInstallDependenciesStatus)
@@ -147,13 +177,14 @@ func NewRouter(api *API, assets embed.FS) http.Handler {
 	return r
 }
 
-func NewAPI(baseDir string, settings *config.Service, manager *download.Manager, depsService *deps.Service, favoritesService *favorites.Service, tokens *auth.TokenManager) *API {
+func NewAPI(baseDir string, settings *config.Service, manager *download.Manager, depsService *deps.Service, favoritesService *favorites.Service, notifier *notification.Service, tokens *auth.TokenManager) *API {
 	return &API{
 		baseDir:    baseDir,
 		settings:   settings,
 		manager:    manager,
 		deps:       depsService,
 		favorites:  favoritesService,
+		notifier:   notifier,
 		tokens:     tokens,
 		monitor:    monitor.NewCollector(time.Now()),
 		disks:      monitor.NewDiskService(30 * time.Minute),
@@ -167,6 +198,10 @@ func (api *API) SetDiskProvider(disks monitor.DiskProvider) {
 
 func (api *API) SetPartitionProvider(partitions monitor.PartitionProvider) {
 	api.partitions = partitions
+}
+
+func (api *API) SetScheduler(service *scheduler.Service) {
+	api.scheduler = service
 }
 
 func (api *API) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +246,115 @@ func (api *API) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settings)
 }
 
+func (api *API) handleListNotificationRules(w http.ResponseWriter, r *http.Request) {
+	if api.notifier == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "notification service is unavailable"})
+		return
+	}
+	rules, err := api.notifier.ListRules(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rules)
+}
+
+func (api *API) handleUpdateDiskTemperatureNotificationRule(w http.ResponseWriter, r *http.Request) {
+	if api.notifier == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "notification service is unavailable"})
+		return
+	}
+	var req diskTemperatureNotificationRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "请求体格式不正确"})
+		return
+	}
+	rule, err := api.notifier.UpdateDiskTemperatureRule(r.Context(), domain.NotificationRuleUpdate{
+		Enabled:            req.Enabled,
+		ThresholdCelsius:   req.ThresholdCelsius,
+		BarkEnabled:        req.BarkEnabled,
+		BarkServerURL:      req.BarkServerURL,
+		BarkDeviceKey:      strings.TrimSpace(req.BarkDeviceKey),
+		ClearBarkDeviceKey: req.ClearBarkDeviceKey,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rule)
+}
+
+func (api *API) handleTestDiskTemperatureNotificationRule(w http.ResponseWriter, r *http.Request) {
+	if api.notifier == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "notification service is unavailable"})
+		return
+	}
+	if err := api.notifier.SendTest(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, jsonResponse{"ok": true})
+}
+
+func (api *API) handleListNotifications(w http.ResponseWriter, r *http.Request) {
+	if api.notifier == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "notification service is unavailable"})
+		return
+	}
+	page := parseInt(r.URL.Query().Get("page"), 1)
+	pageSize := parseInt(r.URL.Query().Get("pageSize"), 20)
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	result, err := api.notifier.ListRecords(r.Context(), page, pageSize)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *API) handleListScheduledTasks(w http.ResponseWriter, r *http.Request) {
+	if api.scheduler == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "scheduled task service is unavailable"})
+		return
+	}
+	tasks, err := api.scheduler.List(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (api *API) handleUpdateScheduledTask(w http.ResponseWriter, r *http.Request) {
+	if api.scheduler == nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": "scheduled task service is unavailable"})
+		return
+	}
+	var req scheduledTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "请求体格式不正确"})
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id == scheduler.TaskBilibiliFavoritesSubscription {
+		if err := api.syncBilibiliFavoriteSubscription(r.Context(), req.Enabled); err != nil {
+			writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+			return
+		}
+	}
+	task, err := api.scheduler.Update(r.Context(), id, domain.ScheduledTaskUpdate{
+		Enabled:         req.Enabled,
+		IntervalMinutes: req.IntervalMinutes,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
 func (api *API) handleSelectDownloadDir(w http.ResponseWriter, r *http.Request) {
 	var req selectDownloadDirRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -233,6 +377,31 @@ func (api *API) handleSelectDownloadDir(w http.ResponseWriter, r *http.Request) 
 	}
 
 	zap.L().Info("select download directory completed", zap.String("selectedDir", selected))
+	writeJSON(w, http.StatusOK, jsonResponse{"path": selected})
+}
+
+func (api *API) handleSelectYtDlpCookie(w http.ResponseWriter, r *http.Request) {
+	var req selectFileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		zap.L().Warn("select yt-dlp cookie request decode failed", zap.Error(err))
+		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": "请求体格式不正确"})
+		return
+	}
+
+	zap.L().Info("select yt-dlp cookie requested", zap.String("currentPath", req.CurrentPath), zap.String("remoteAddr", r.RemoteAddr))
+	selected, err := util.SelectTextFile(req.CurrentPath)
+	if err != nil {
+		zap.L().Error("select yt-dlp cookie failed", zap.String("currentPath", req.CurrentPath), zap.Error(err))
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
+	if selected == "" {
+		zap.L().Info("select yt-dlp cookie canceled", zap.String("currentPath", req.CurrentPath))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	zap.L().Info("select yt-dlp cookie completed", zap.String("selectedPath", selected))
 	writeJSON(w, http.StatusOK, jsonResponse{"path": selected})
 }
 
@@ -447,6 +616,10 @@ func (api *API) handlePutFavoriteSubscription(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, jsonResponse{"error": err.Error()})
 		return
 	}
+	if err := api.syncBilibiliFavoritesScheduledTask(r.Context(), sub.Enabled); err != nil {
+		writeJSON(w, http.StatusInternalServerError, jsonResponse{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, sub)
 }
 
@@ -465,6 +638,46 @@ func (api *API) handleRunFavoriteSubscription(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, sub)
+}
+
+func (api *API) syncBilibiliFavoriteSubscription(ctx context.Context, enabled bool) error {
+	if api.favorites == nil {
+		return nil
+	}
+	sub, err := api.favorites.Subscription()
+	if err != nil {
+		return err
+	}
+	sub.Enabled = enabled
+	_, err = api.favorites.SaveSubscription(sub)
+	return err
+}
+
+func (api *API) syncBilibiliFavoritesScheduledTask(ctx context.Context, enabled bool) error {
+	if api.scheduler == nil {
+		return nil
+	}
+	interval := 10
+	tasks, err := api.scheduler.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task.ID != scheduler.TaskBilibiliFavoritesSubscription {
+			continue
+		}
+		if task.IntervalMinutes > 0 {
+			interval = task.IntervalMinutes
+		} else if task.DefaultIntervalMinutes > 0 {
+			interval = task.DefaultIntervalMinutes
+		}
+		break
+	}
+	_, err = api.scheduler.Update(ctx, scheduler.TaskBilibiliFavoritesSubscription, domain.ScheduledTaskUpdate{
+		Enabled:         enabled,
+		IntervalMinutes: interval,
+	})
+	return err
 }
 
 func (api *API) handleGetDependencies(w http.ResponseWriter, r *http.Request) {

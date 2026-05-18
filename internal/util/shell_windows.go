@@ -104,3 +104,43 @@ func SelectFolder(initialDir string) (string, error) {
 	zap.L().Info("folder selected", zap.String("path", selected))
 	return selected, nil
 }
+
+func SelectTextFile(initialPath string) (string, error) {
+	zap.L().Info("opening text file picker", zap.String("initialPath", initialPath))
+	script := strings.Join([]string{
+		"Add-Type -AssemblyName System.Windows.Forms",
+		"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false",
+		"$owner = New-Object System.Windows.Forms.Form",
+		"$owner.TopMost = $true",
+		"$owner.ShowInTaskbar = $false",
+		"$owner.StartPosition = 'CenterScreen'",
+		"$owner.Width = 1",
+		"$owner.Height = 1",
+		"$owner.Show()",
+		"$owner.Activate()",
+		"$dialog = New-Object System.Windows.Forms.OpenFileDialog",
+		"$dialog.Title = '选择 yt-dlp Cookie txt 文件'",
+		"$dialog.Filter = 'Text files (*.txt)|*.txt|All files (*.*)|*.*'",
+		"$dialog.CheckFileExists = $true",
+		"$dialog.Multiselect = $false",
+		"$initial = [Environment]::GetEnvironmentVariable('DOWNGO_INITIAL_FILE')",
+		"if ($initial -and [System.IO.File]::Exists($initial)) { $dialog.InitialDirectory = [System.IO.Path]::GetDirectoryName($initial); $dialog.FileName = [System.IO.Path]::GetFileName($initial) }",
+		"try { if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.FileName } } finally { $owner.Close(); $owner.Dispose(); $dialog.Dispose() }",
+	}, "; ")
+
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-Command", script)
+	cmd.Env = append(os.Environ(), "DOWNGO_INITIAL_FILE="+initialPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		zap.L().Error("text file picker failed", zap.String("initialPath", initialPath), zap.ByteString("output", output), zap.Error(err))
+		return "", fmt.Errorf("选择文件窗口启动失败: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	selected := strings.TrimSpace(string(output))
+	if selected == "" {
+		zap.L().Info("text file picker canceled", zap.String("initialPath", initialPath))
+		return "", nil
+	}
+	zap.L().Info("text file selected", zap.String("path", selected))
+	return selected, nil
+}

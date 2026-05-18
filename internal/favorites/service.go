@@ -16,8 +16,6 @@ import (
 	"example.com/downgo/internal/download"
 )
 
-const checkInterval = 10 * time.Minute
-
 type Service struct {
 	store    *db.Store
 	settings *config.Service
@@ -41,7 +39,6 @@ func NewService(store *db.Store, settings *config.Service, manager *download.Man
 func (s *Service) Start() {
 	s.once.Do(func() {
 		go s.watchDownloads()
-		go s.schedule()
 	})
 }
 
@@ -80,22 +77,6 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.runOnceLocked(ctx)
-}
-
-func (s *Service) schedule() {
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-timer.C:
-			if err := s.RunOnce(s.ctx); err != nil {
-				zap.L().Warn("bilibili favorite subscription run failed", zap.Error(err))
-			}
-			timer.Reset(checkInterval)
-		}
-	}
 }
 
 func (s *Service) watchDownloads() {

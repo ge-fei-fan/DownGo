@@ -112,6 +112,8 @@ Authorization: Bearer <token>
   "downloadDir": "F:\\code2\\DownGo\\data\\downloads",
   "concurrentDownloads": 2,
   "ytDlpPath": "F:\\code2\\DownGo\\data\\bin\\yt-dlp.exe",
+  "ytDlpCookiePath": "",
+  "ytDlpCookieEnabled": false,
   "ffmpegPath": "F:\\code2\\DownGo\\data\\bin\\ffmpeg.exe",
   "bilibiliMid": 0,
   "bilibiliUname": "",
@@ -274,6 +276,8 @@ PUT /api/settings
   "downloadDir": "F:\\Downloads",
   "concurrentDownloads": 2,
   "ytDlpPath": "F:\\code2\\DownGo\\data\\bin\\yt-dlp.exe",
+  "ytDlpCookiePath": "F:\\cookies\\youtube.txt",
+  "ytDlpCookieEnabled": true,
   "ffmpegPath": "F:\\code2\\DownGo\\data\\bin\\ffmpeg.exe",
   "accessPassword": "新访问密码"
 }
@@ -284,7 +288,8 @@ PUT /api/settings
 说明：
 
 - `accessPassword` 为空时不会修改访问密码。
-- 当前后端更新逻辑会处理 `bindHost`、`port`、`downloadDir`、`concurrentDownloads`、`accessPassword`。
+- `ytDlpCookieEnabled` 为 `true` 时，`ytDlpCookiePath` 必须指向存在的 `.txt` 文件；启用后 YouTube 解析和下载会带入 `--cookies` 参数。
+- 当前后端更新逻辑会处理 `bindHost`、`port`、`downloadDir`、`concurrentDownloads`、`ytDlpCookiePath`、`ytDlpCookieEnabled`、`accessPassword`。
 
 ### 选择下载目录
 
@@ -311,6 +316,128 @@ POST /api/settings/download-dir/select
 ```
 
 - `204 No Content`：用户取消选择
+
+### 选择 yt-dlp Cookie 文件
+
+```http
+POST /api/settings/yt-dlp-cookie/select
+```
+
+请求体：
+
+```json
+{
+  "currentPath": "F:\\cookies\\youtube.txt"
+}
+```
+
+成功响应：
+
+- `200 OK`：用户选择了 txt 文件
+
+```json
+{
+  "path": "F:\\cookies\\youtube.txt"
+}
+```
+
+- `204 No Content`：用户取消选择
+
+## 通知接口
+
+以下接口需要鉴权。
+
+### 查询通知规则
+
+```http
+GET /api/notifications/rules
+```
+
+成功响应：`200 OK`，返回通知规则列表。当前内置规则为 `disk-temperature`。
+
+### 更新磁盘温度通知规则
+
+```http
+PUT /api/notifications/rules/disk-temperature
+```
+
+请求体：
+
+```json
+{
+  "enabled": true,
+  "thresholdCelsius": 50,
+  "barkEnabled": true,
+  "barkServerUrl": "https://api.day.app",
+  "barkDeviceKey": "your-device-key",
+  "clearBarkDeviceKey": false
+}
+```
+
+说明：
+
+- `thresholdCelsius` 为告警温度，当前按 `磁盘温度 > 阈值` 触发。
+- `barkServerUrl` 可填写官方服务端或自建 Bark Server 根地址。
+- 通知规则响应会返回已保存的 `barkDeviceKey`，用于页面和 `barkServerUrl` 一起展示。
+- `barkDeviceKey` 为空时保留已保存的 key；`clearBarkDeviceKey=true` 会清空已保存的 key。
+- `barkEnabled` 只表示告警规则是否选择 Bark 渠道；Bark 测试只依赖已保存的 Bark 服务端和 device key。
+- 告警规则启用后即使没有可用通知渠道，超温也会生成 `disabled` 通知记录，但不会发送通知。
+- 同一块磁盘 60 分钟内不会重复发送 Bark 通知。
+
+### 测试 Bark 通知
+
+```http
+POST /api/notifications/rules/disk-temperature/test
+```
+
+成功响应：
+
+```json
+{
+  "ok": true
+}
+```
+
+### 查询通知历史
+
+```http
+GET /api/notifications?page=1&pageSize=20
+```
+
+成功响应：`200 OK`，返回分页通知历史，包含磁盘、温度、阈值、发送状态、错误信息和冷却抑制次数。
+
+## 定时任务接口
+
+以下接口需要鉴权。
+
+### 查询定时任务
+
+```http
+GET /api/scheduled-tasks
+```
+
+成功响应：`200 OK`，返回当前可配置的后台定时任务列表。当前包含硬盘温度刷新和 Bilibili 收藏夹订阅检查。
+
+### 更新定时任务
+
+```http
+PUT /api/scheduled-tasks/{id}
+```
+
+请求体：
+
+```json
+{
+  "enabled": true,
+  "intervalMinutes": 30
+}
+```
+
+说明：
+
+- `intervalMinutes` 单位为分钟，范围为 1 到 1440。
+- 关闭硬盘温度刷新只影响后台自动刷新，不影响手动刷新接口。
+- 关闭 Bilibili 收藏夹订阅检查只影响后台自动检查，不影响手动检查接口。
 
 ## 下载任务接口
 

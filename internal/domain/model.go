@@ -104,3 +104,81 @@ type DiskTemperatureSample struct {
 	TemperatureError   string
 	SampledAt          time.Time
 }
+
+const (
+	NotificationTypeDiskTemperature = "disk_temperature"
+
+	NotificationChannelBark = "bark"
+
+	NotificationStatusSent     = "sent"
+	NotificationStatusFailed   = "failed"
+	NotificationStatusDisabled = "disabled"
+)
+
+type NotificationRule struct {
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Type             string    `json:"type"`
+	Enabled          bool      `json:"enabled"`
+	ThresholdCelsius int       `json:"thresholdCelsius"`
+	BarkEnabled      bool      `json:"barkEnabled"`
+	BarkServerURL    string    `json:"barkServerUrl"`
+	BarkDeviceKey    string    `json:"barkDeviceKey"`
+	BarkDeviceKeySet bool      `json:"barkDeviceKeySet"`
+	CooldownMinutes  int       `json:"cooldownMinutes"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+type NotificationRuleUpdate struct {
+	Enabled            bool
+	ThresholdCelsius   int
+	BarkEnabled        bool
+	BarkServerURL      string
+	BarkDeviceKey      string
+	ClearBarkDeviceKey bool
+}
+
+type NotificationRecord struct {
+	ID                 int64      `json:"id"`
+	Type               string     `json:"type"`
+	Channel            string     `json:"channel"`
+	Title              string     `json:"title"`
+	Body               string     `json:"body"`
+	Status             string     `json:"status"`
+	ErrorMessage       string     `json:"errorMessage"`
+	DiskKey            string     `json:"diskKey"`
+	DeviceID           string     `json:"deviceId"`
+	FriendlyName       string     `json:"friendlyName"`
+	SerialNumber       string     `json:"serialNumber"`
+	TemperatureCelsius int        `json:"temperatureCelsius"`
+	ThresholdCelsius   int        `json:"thresholdCelsius"`
+	SuppressedCount    int        `json:"suppressedCount"`
+	LastSuppressedAt   *time.Time `json:"lastSuppressedAt,omitempty"`
+	SentAt             *time.Time `json:"sentAt,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+}
+
+type PagedNotifications struct {
+	Items    []NotificationRecord `json:"items"`
+	Total    int                  `json:"total"`
+	Page     int                  `json:"page"`
+	PageSize int                  `json:"pageSize"`
+}
+
+type ScheduledTask struct {
+	ID                     string     `json:"id"`
+	Name                   string     `json:"name"`
+	Description            string     `json:"description"`
+	Enabled                bool       `json:"enabled"`
+	IntervalMinutes        int        `json:"intervalMinutes"`
+	DefaultIntervalMinutes int        `json:"defaultIntervalMinutes"`
+	LastRunAt              *time.Time `json:"lastRunAt,omitempty"`
+	NextRunAt              *time.Time `json:"nextRunAt,omitempty"`
+	LastError              string     `json:"lastError"`
+	UpdatedAt              time.Time  `json:"updatedAt"`
+}
+
+type ScheduledTaskUpdate struct {
+	Enabled         bool
+	IntervalMinutes int
+}

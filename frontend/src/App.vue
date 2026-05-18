@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DownloadOutlined, LogoutOutlined, MenuOutlined, SettingOutlined } from '@ant-design/icons-vue'
+import { BellOutlined, ClockCircleOutlined, DownloadOutlined, LogoutOutlined, MenuOutlined, SettingOutlined } from '@ant-design/icons-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 
 import { useDepsStore } from '@/stores/deps'
@@ -36,7 +36,7 @@ const logout = () => {
   router.push({ name: 'login' })
 }
 
-const goTo = (name: 'downloads' | 'settings') => {
+const goTo = (name: 'downloads' | 'notifications' | 'scheduled-tasks' | 'settings') => {
   navOpen.value = false
   router.push({ name })
 }
@@ -83,6 +83,14 @@ onBeforeUnmount(() => {
             <template #icon><DownloadOutlined /></template>
             下载列表
           </a-menu-item>
+          <a-menu-item key="notifications" @click="goTo('notifications')">
+            <template #icon><BellOutlined /></template>
+            通知
+          </a-menu-item>
+          <a-menu-item key="scheduled-tasks" @click="goTo('scheduled-tasks')">
+            <template #icon><ClockCircleOutlined /></template>
+            定时任务
+          </a-menu-item>
           <a-menu-item key="settings" @click="goTo('settings')">
             <template #icon><SettingOutlined /></template>
             设置
@@ -116,6 +124,14 @@ onBeforeUnmount(() => {
         <a-menu-item key="downloads" @click="goTo('downloads')">
           <template #icon><DownloadOutlined /></template>
           下载列表
+        </a-menu-item>
+        <a-menu-item key="notifications" @click="goTo('notifications')">
+          <template #icon><BellOutlined /></template>
+          通知
+        </a-menu-item>
+        <a-menu-item key="scheduled-tasks" @click="goTo('scheduled-tasks')">
+          <template #icon><ClockCircleOutlined /></template>
+          定时任务
         </a-menu-item>
         <a-menu-item key="settings" @click="goTo('settings')">
           <template #icon><SettingOutlined /></template>

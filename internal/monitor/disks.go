@@ -126,6 +126,7 @@ type DiskService struct {
 	physical        physicalDiskFunc
 	smartctlPath    string
 	history         DiskTemperatureHistoryStore
+	temperatureHook func(context.Context, DiskTemperatureSnapshot)
 
 	mu          sync.RWMutex
 	temps       DiskTemperatureSnapshot
@@ -162,8 +163,21 @@ func (s *DiskService) SetSmartctlPath(path string) {
 	}
 }
 
+func (s *DiskService) SetRefreshInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshInterval = interval
+}
+
 func (s *DiskService) SetTemperatureHistoryStore(store DiskTemperatureHistoryStore) {
 	s.history = store
+}
+
+func (s *DiskService) SetTemperatureHook(hook func(context.Context, DiskTemperatureSnapshot)) {
+	s.temperatureHook = hook
 }
 
 func (s *DiskService) Start(ctx context.Context) {
@@ -287,7 +301,10 @@ func (s *DiskService) RefreshDiskTemperatures(ctx context.Context) (DiskTemperat
 		})
 	}
 
-	next := now.Add(s.refreshInterval)
+	s.mu.RLock()
+	refreshInterval := s.refreshInterval
+	s.mu.RUnlock()
+	next := now.Add(refreshInterval)
 	s.mu.Lock()
 	s.lastRefresh = now
 	s.nextRefresh = next
@@ -313,6 +330,9 @@ func (s *DiskService) RefreshDiskTemperatures(ctx context.Context) (DiskTemperat
 	s.mu.Unlock()
 
 	s.saveTemperatureHistory(ctx, items, now)
+	if s.temperatureHook != nil {
+		s.temperatureHook(ctx, snapshot)
+	}
 	return snapshot, nil
 }
 

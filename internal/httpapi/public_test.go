@@ -736,7 +736,7 @@ func newPublicAPITestServerWithMonitor(t *testing.T, runner download.Runner, met
 	if err != nil {
 		t.Fatalf("NewManagerWithBaseDir() error = %v", err)
 	}
-	api := NewAPI(baseDir, settings, manager, deps.NewService(baseDir, nil), nil, auth.NewTokenManager("test"))
+	api := NewAPI(baseDir, settings, manager, deps.NewService(baseDir, nil), nil, nil, auth.NewTokenManager("test"))
 	api.monitor = metrics
 	api.SetDiskProvider(staticDisks())
 	api.SetPartitionProvider(staticPartitions())

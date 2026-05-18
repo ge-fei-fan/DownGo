@@ -92,4 +92,53 @@ ON disk_temperature_samples(sampled_at);
 
 CREATE INDEX IF NOT EXISTS idx_disk_temperature_samples_disk_time
 ON disk_temperature_samples(device_id, serial_number, sampled_at);
+
+CREATE TABLE IF NOT EXISTS notification_rules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  threshold_celsius INTEGER NOT NULL DEFAULT 50,
+  bark_enabled INTEGER NOT NULL DEFAULT 0,
+  bark_server_url TEXT NOT NULL DEFAULT 'https://api.day.app',
+  bark_device_key TEXT NOT NULL DEFAULT '',
+  cooldown_minutes INTEGER NOT NULL DEFAULT 60,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS notification_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL,
+  error_message TEXT NOT NULL DEFAULT '',
+  disk_key TEXT NOT NULL DEFAULT '',
+  device_id TEXT NOT NULL DEFAULT '',
+  friendly_name TEXT NOT NULL DEFAULT '',
+  serial_number TEXT NOT NULL DEFAULT '',
+  temperature_celsius INTEGER NOT NULL DEFAULT 0,
+  threshold_celsius INTEGER NOT NULL DEFAULT 0,
+  suppressed_count INTEGER NOT NULL DEFAULT 0,
+  last_suppressed_at DATETIME,
+  sent_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_records_created
+ON notification_records(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_notification_records_type_disk
+ON notification_records(type, disk_key, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  interval_minutes INTEGER NOT NULL,
+  last_run_at DATETIME,
+  next_run_at DATETIME,
+  last_error TEXT NOT NULL DEFAULT '',
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `

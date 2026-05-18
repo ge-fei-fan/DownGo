@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +25,8 @@ type Settings struct {
 	DownloadDir          string `json:"downloadDir"`
 	ConcurrentDownloads  int    `json:"concurrentDownloads"`
 	YtDlpPath            string `json:"ytDlpPath"`
+	YtDlpCookiePath      string `json:"ytDlpCookiePath"`
+	YtDlpCookieEnabled   bool   `json:"ytDlpCookieEnabled"`
 	FfmpegPath           string `json:"ffmpegPath"`
 	BilibiliMid          int    `json:"bilibiliMid"`
 	BilibiliUname        string `json:"bilibiliUname"`
@@ -69,6 +74,8 @@ type UpdateInput struct {
 	DownloadDir         string `json:"downloadDir"`
 	ConcurrentDownloads int    `json:"concurrentDownloads"`
 	YtDlpPath           string `json:"ytDlpPath"`
+	YtDlpCookiePath     string `json:"ytDlpCookiePath"`
+	YtDlpCookieEnabled  bool   `json:"ytDlpCookieEnabled"`
 	FfmpegPath          string `json:"ffmpegPath"`
 	AccessPassword      string `json:"accessPassword"`
 }
@@ -133,8 +140,13 @@ func (s *Service) Update(input UpdateInput, passwordHash func(string) string) (S
 	if input.ConcurrentDownloads > 0 {
 		next.ConcurrentDownloads = input.ConcurrentDownloads
 	}
+	next.YtDlpCookiePath = strings.TrimSpace(input.YtDlpCookiePath)
+	next.YtDlpCookieEnabled = input.YtDlpCookieEnabled
 	if input.AccessPassword != "" {
 		next.AccessTokenHash = passwordHash(input.AccessPassword)
+	}
+	if err := validateYtDlpCookie(next); err != nil {
+		return Settings{}, err
 	}
 
 	if err := s.persist(next); err != nil {
@@ -290,6 +302,12 @@ func (s *Service) load(defaults Settings) error {
 			settings.ConcurrentDownloads = parsed
 		}
 	}
+	if value, ok := rows["yt_dlp_cookie_path"]; ok && value != "" {
+		settings.YtDlpCookiePath = value
+	}
+	if value, ok := rows["yt_dlp_cookie_enabled"]; ok && value != "" {
+		settings.YtDlpCookieEnabled = value == "true"
+	}
 	if value, ok := rows["access_token_hash"]; ok && value != "" {
 		settings.AccessTokenHash = value
 	}
@@ -372,6 +390,8 @@ func (s *Service) persist(settings Settings) error {
 		"port":                   strconv.Itoa(settings.Port),
 		"download_dir":           settings.DownloadDir,
 		"concurrent_downloads":   strconv.Itoa(settings.ConcurrentDownloads),
+		"yt_dlp_cookie_path":     settings.YtDlpCookiePath,
+		"yt_dlp_cookie_enabled":  strconv.FormatBool(settings.YtDlpCookieEnabled),
 		"access_token_hash":      settings.AccessTokenHash,
 		"bilibili_sessdata":      settings.BilibiliSessdata,
 		"bilibili_jct":           settings.BilibiliJct,
@@ -392,6 +412,29 @@ func (s *Service) persist(settings Settings) error {
 		"bilibili_senior_member": strconv.FormatBool(settings.BilibiliSeniorMember),
 	}
 	return s.store.UpsertSettings(pairs)
+}
+
+func validateYtDlpCookie(settings Settings) error {
+	if !settings.YtDlpCookieEnabled {
+		return nil
+	}
+	if strings.TrimSpace(settings.YtDlpCookiePath) == "" {
+		return errors.New("启用 yt-dlp Cookie 时请选择 cookie txt 文件")
+	}
+	if strings.ToLower(filepath.Ext(settings.YtDlpCookiePath)) != ".txt" {
+		return errors.New("yt-dlp Cookie 文件必须是 .txt 文件")
+	}
+	info, err := os.Stat(settings.YtDlpCookiePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return errors.New("yt-dlp Cookie 文件不存在")
+		}
+		return err
+	}
+	if info.IsDir() {
+		return errors.New("yt-dlp Cookie 路径不能是目录")
+	}
+	return nil
 }
 
 func bilibiliSessionFromSettings(settings Settings) BilibiliSession {

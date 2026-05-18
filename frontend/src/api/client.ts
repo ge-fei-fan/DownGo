@@ -58,12 +58,82 @@ export type SettingsDTO = {
   downloadDir: string
   concurrentDownloads: number
   ytDlpPath: string
+  ytDlpCookiePath: string
+  ytDlpCookieEnabled: boolean
   ffmpegPath: string
   bilibiliMid: number
   bilibiliUname: string
   bilibiliFace: string
   bilibiliLoginAt: string
   accessPassword?: string
+}
+
+export type NotificationRuleDTO = {
+  id: string
+  name: string
+  type: string
+  enabled: boolean
+  thresholdCelsius: number
+  barkEnabled: boolean
+  barkServerUrl: string
+  barkDeviceKey: string
+  barkDeviceKeySet: boolean
+  cooldownMinutes: number
+  updatedAt: string
+}
+
+export type NotificationRecordDTO = {
+  id: number
+  type: string
+  channel: string
+  title: string
+  body: string
+  status: string
+  errorMessage: string
+  diskKey: string
+  deviceId: string
+  friendlyName: string
+  serialNumber: string
+  temperatureCelsius: number
+  thresholdCelsius: number
+  suppressedCount: number
+  lastSuppressedAt?: string
+  sentAt?: string
+  createdAt: string
+}
+
+export type PagedNotifications = {
+  items: NotificationRecordDTO[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export type DiskTemperatureNotificationRulePayload = {
+  enabled: boolean
+  thresholdCelsius: number
+  barkEnabled: boolean
+  barkServerUrl: string
+  barkDeviceKey?: string
+  clearBarkDeviceKey?: boolean
+}
+
+export type ScheduledTaskDTO = {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  intervalMinutes: number
+  defaultIntervalMinutes: number
+  lastRunAt?: string
+  nextRunAt?: string
+  lastError: string
+  updatedAt: string
+}
+
+export type ScheduledTaskPayload = {
+  enabled: boolean
+  intervalMinutes: number
 }
 
 export type BilibiliSessionDTO = {
@@ -226,6 +296,43 @@ export async function selectDownloadDir(currentDir: string) {
   return request<DirectorySelectionDTO | undefined>('/api/settings/download-dir/select', {
     method: 'POST',
     body: JSON.stringify({ currentDir }),
+  })
+}
+
+export async function selectYtDlpCookieFile(currentPath: string) {
+  return request<DirectorySelectionDTO | undefined>('/api/settings/yt-dlp-cookie/select', {
+    method: 'POST',
+    body: JSON.stringify({ currentPath }),
+  })
+}
+
+export async function listNotificationRules() {
+  return request<NotificationRuleDTO[]>('/api/notifications/rules')
+}
+
+export async function updateDiskTemperatureNotificationRule(payload: DiskTemperatureNotificationRulePayload) {
+  return request<NotificationRuleDTO>('/api/notifications/rules/disk-temperature', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function testDiskTemperatureNotificationRule() {
+  return request<{ ok: boolean }>('/api/notifications/rules/disk-temperature/test', { method: 'POST' })
+}
+
+export async function listNotifications(page = 1, pageSize = 20) {
+  return request<PagedNotifications>(`/api/notifications?page=${page}&pageSize=${pageSize}`)
+}
+
+export async function listScheduledTasks() {
+  return request<ScheduledTaskDTO[]>('/api/scheduled-tasks')
+}
+
+export async function updateScheduledTask(id: string, payload: ScheduledTaskPayload) {
+  return request<ScheduledTaskDTO>(`/api/scheduled-tasks/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
   })
 }
 

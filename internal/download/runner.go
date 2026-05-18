@@ -89,13 +89,7 @@ func (r *PlatformRunner) Download(ctx context.Context, settings config.Settings,
 }
 
 func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url string) ([]domain.InspectResult, error) {
-	args := []string{
-		"--dump-single-json",
-		"--no-playlist",
-		"-f", "bestvideo*+bestaudio/best",
-		"--merge-output-format", "mp4",
-		url,
-	}
+	args := buildInspectArgs(settings, url)
 	cmd := exec.CommandContext(ctx, settings.YtDlpPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
@@ -138,6 +132,17 @@ func (r *YTDLPRunner) Inspect(ctx context.Context, settings config.Settings, url
 		EstimatedSizeBytes: parsed.FilesizeApprox,
 		SuggestedFilename:  safeOutputFilename(title, parsed.ID),
 	}}, nil
+}
+
+func buildInspectArgs(settings config.Settings, url string) []string {
+	args := []string{
+		"--dump-single-json",
+		"--no-playlist",
+		"-f", "bestvideo*+bestaudio/best",
+		"--merge-output-format", "mp4",
+	}
+	args = appendYtDlpCookieArgs(args, settings)
+	return append(args, url)
 }
 
 func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, item domain.DownloadItem, onStart func(int), onProgress func(string, float64, float64, int64, string, string)) error {
@@ -202,7 +207,7 @@ func (r *YTDLPRunner) Download(ctx context.Context, settings config.Settings, it
 }
 
 func buildDownloadArgs(settings config.Settings, item domain.DownloadItem) []string {
-	return []string{
+	args := []string{
 		"--newline",
 		"--progress",
 		"--progress-delta", progressDeltaSeconds,
@@ -216,8 +221,16 @@ func buildDownloadArgs(settings config.Settings, item domain.DownloadItem) []str
 		"--merge-output-format", "mp4",
 		"--ffmpeg-location", filepath.Dir(settings.FfmpegPath),
 		"-o", item.OutputPath,
-		item.NormalizedURL,
 	}
+	args = appendYtDlpCookieArgs(args, settings)
+	return append(args, item.NormalizedURL)
+}
+
+func appendYtDlpCookieArgs(args []string, settings config.Settings) []string {
+	if settings.YtDlpCookieEnabled && strings.TrimSpace(settings.YtDlpCookiePath) != "" {
+		args = append(args, "--cookies", settings.YtDlpCookiePath)
+	}
+	return args
 }
 
 func scanOutput(stream string, pipe io.ReadCloser, lineCh chan<- streamLine, errCh chan<- error, wg *sync.WaitGroup) {

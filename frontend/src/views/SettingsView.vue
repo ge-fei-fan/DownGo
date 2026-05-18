@@ -14,6 +14,7 @@ import {
   pollBilibiliQRCode,
   runFavoriteSubscription,
   selectDownloadDir,
+  selectYtDlpCookieFile,
   updateFavoriteSubscription,
   updateSettings,
   type BilibiliSessionDTO,
@@ -29,6 +30,7 @@ const deps = useDepsStore()
 const loading = ref(false)
 const saving = ref(false)
 const selectingDir = ref(false)
+const selectingCookie = ref(false)
 const biliLoading = ref(false)
 const biliChecking = ref(false)
 const biliDialogOpen = ref(false)
@@ -49,6 +51,8 @@ const form = reactive<SettingsDTO>({
   downloadDir: '',
   concurrentDownloads: 2,
   ytDlpPath: '',
+  ytDlpCookiePath: '',
+  ytDlpCookieEnabled: false,
   ffmpegPath: '',
   bilibiliMid: 0,
   bilibiliUname: '',
@@ -117,6 +121,26 @@ async function chooseDownloadDir() {
   } finally {
     selectingDir.value = false
   }
+}
+
+async function chooseYtDlpCookie() {
+  selectingCookie.value = true
+  try {
+    const selected = await selectYtDlpCookieFile(form.ytDlpCookiePath)
+    if (selected?.path) {
+      form.ytDlpCookiePath = selected.path
+      form.ytDlpCookieEnabled = true
+    }
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '选择 Cookie 文件失败')
+  } finally {
+    selectingCookie.value = false
+  }
+}
+
+function clearYtDlpCookie() {
+  form.ytDlpCookiePath = ''
+  form.ytDlpCookieEnabled = false
 }
 
 function installDependencies() {
@@ -491,6 +515,18 @@ onBeforeUnmount(stopBilibiliPolling)
         </a-input-group>
       </a-form-item>
 
+      <a-form-item label="yt-dlp Cookie">
+        <div class="cookie-control">
+          <a-switch v-model:checked="form.ytDlpCookieEnabled" checked-children="启用" un-checked-children="关闭" />
+          <a-input-group compact class="cookie-path-control">
+            <a-input v-model:value="form.ytDlpCookiePath" placeholder="选择或输入 cookie txt 文件路径" />
+            <a-button :loading="selectingCookie" @click="chooseYtDlpCookie">选择文件</a-button>
+            <a-button @click="clearYtDlpCookie">清空</a-button>
+          </a-input-group>
+        </div>
+        <div class="field-hint">默认关闭；启用后，YouTube 解析和下载会通过 yt-dlp 使用该 cookies.txt 文件。</div>
+      </a-form-item>
+
       <a-row :gutter="16">
         <a-col :xs="24" :md="12">
           <a-form-item label="并发下载数">
@@ -741,6 +777,23 @@ h1 {
   min-width: 0;
 }
 
+.cookie-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cookie-path-control {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.cookie-path-control :deep(.ant-input) {
+  flex: 1;
+  min-width: 0;
+}
+
 .deps-header {
   display: flex;
   justify-content: space-between;
@@ -824,6 +877,10 @@ h1 {
 
   .deps-header :deep(.ant-btn) {
     width: 100%;
+  }
+
+  .cookie-control {
+    display: grid;
   }
 }
 </style>

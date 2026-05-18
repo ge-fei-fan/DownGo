@@ -3,6 +3,8 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import DownloadsView from '@/views/DownloadsView.vue'
 import LoginView from '@/views/LoginView.vue'
+import NotificationsView from '@/views/NotificationsView.vue'
+import ScheduledTasksView from '@/views/ScheduledTasksView.vue'
 import SettingsView from '@/views/SettingsView.vue'
 
 const router = createRouter({
@@ -11,6 +13,8 @@ const router = createRouter({
     { path: '/', redirect: '/downloads' },
     { path: '/login', name: 'login', component: LoginView },
     { path: '/downloads', name: 'downloads', component: DownloadsView },
+    { path: '/notifications', name: 'notifications', component: NotificationsView },
+    { path: '/scheduled-tasks', name: 'scheduled-tasks', component: ScheduledTasksView },
     { path: '/settings', name: 'settings', component: SettingsView },
   ],
 })

@@ -119,3 +119,66 @@ func TestBuildDownloadArgsIncludesProgressFlags(t *testing.T) {
 		t.Fatal("expected postprocess progress template with prefix in args")
 	}
 }
+
+func TestBuildDownloadArgsOmitsCookiesByDefault(t *testing.T) {
+	t.Parallel()
+
+	settings := config.Settings{
+		FfmpegPath: filepath.Join(`C:\tools`, "ffmpeg.exe"),
+	}
+	item := domain.DownloadItem{
+		OutputPath:    filepath.Join(`C:\downloads`, "video.mp4"),
+		NormalizedURL: "https://www.youtube.com/watch?v=abc123",
+	}
+
+	args := buildDownloadArgs(settings, item)
+
+	if slices.Contains(args, "--cookies") {
+		t.Fatal("expected download args to omit --cookies by default")
+	}
+}
+
+func TestBuildDownloadArgsIncludesEnabledCookies(t *testing.T) {
+	t.Parallel()
+
+	cookiePath := filepath.Join(`C:\cookies`, "youtube.txt")
+	settings := config.Settings{
+		FfmpegPath:         filepath.Join(`C:\tools`, "ffmpeg.exe"),
+		YtDlpCookiePath:    cookiePath,
+		YtDlpCookieEnabled: true,
+	}
+	item := domain.DownloadItem{
+		OutputPath:    filepath.Join(`C:\downloads`, "video.mp4"),
+		NormalizedURL: "https://www.youtube.com/watch?v=abc123",
+	}
+
+	args := buildDownloadArgs(settings, item)
+
+	cookieIndex := slices.Index(args, "--cookies")
+	if cookieIndex < 0 {
+		t.Fatal("expected download args to include --cookies")
+	}
+	if cookieIndex+1 >= len(args) || args[cookieIndex+1] != cookiePath {
+		t.Fatalf("cookie path after --cookies = %q, want %q", args[cookieIndex+1], cookiePath)
+	}
+}
+
+func TestBuildInspectArgsIncludesEnabledCookies(t *testing.T) {
+	t.Parallel()
+
+	cookiePath := filepath.Join(`C:\cookies`, "youtube.txt")
+	settings := config.Settings{
+		YtDlpCookiePath:    cookiePath,
+		YtDlpCookieEnabled: true,
+	}
+
+	args := buildInspectArgs(settings, "https://www.youtube.com/watch?v=abc123")
+
+	cookieIndex := slices.Index(args, "--cookies")
+	if cookieIndex < 0 {
+		t.Fatal("expected inspect args to include --cookies")
+	}
+	if cookieIndex+1 >= len(args) || args[cookieIndex+1] != cookiePath {
+		t.Fatalf("cookie path after --cookies = %q, want %q", args[cookieIndex+1], cookiePath)
+	}
+}

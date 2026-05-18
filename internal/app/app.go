@@ -15,10 +15,13 @@ import (
 	"example.com/downgo/internal/config"
 	"example.com/downgo/internal/db"
 	"example.com/downgo/internal/deps"
+	"example.com/downgo/internal/domain"
 	"example.com/downgo/internal/download"
 	"example.com/downgo/internal/favorites"
 	"example.com/downgo/internal/httpapi"
 	"example.com/downgo/internal/monitor"
+	"example.com/downgo/internal/notification"
+	"example.com/downgo/internal/scheduler"
 	"example.com/downgo/internal/util"
 	"example.com/downgo/webui"
 )
@@ -32,6 +35,8 @@ type App struct {
 	password  string
 	manager   *download.Manager
 	favorites *favorites.Service
+	notifier  *notification.Service
+	scheduler *scheduler.Service
 	disks     *monitor.DiskService
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -78,14 +83,54 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 
 	depsService := deps.NewService(baseDir, nil)
 	favoritesService := favorites.NewService(store, settingsService, manager, nil)
+	notificationService, err := notification.NewService(store, nil)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	tokens := auth.NewTokenManager(baseDir + "|downgo")
 	appCtx, appCancel := context.WithCancel(context.Background())
 	diskService := monitor.NewDiskService(30 * time.Minute)
 	diskService.SetSmartctlPath(filepath.Join(baseDir, "data", "bin", "smartctl.exe"))
 	diskService.SetTemperatureHistoryStore(store)
-	diskService.Start(appCtx)
-	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, favoritesService, tokens)
+	diskService.SetTemperatureHook(func(_ context.Context, snapshot monitor.DiskTemperatureSnapshot) {
+		go notificationService.CheckDiskTemperatures(appCtx, snapshot)
+	})
+	schedulerService, err := scheduler.NewService(appCtx, store, []scheduler.TaskDefinition{
+		{
+			ID:                     scheduler.TaskDiskTemperatureRefresh,
+			Name:                   "硬盘温度刷新",
+			Description:            "刷新硬盘温度、SMART 信息，并触发磁盘温度告警检查。",
+			DefaultEnabled:         true,
+			DefaultIntervalMinutes: 30,
+			Run: func(ctx context.Context, task domain.ScheduledTask) error {
+				diskService.SetRefreshInterval(time.Duration(task.IntervalMinutes) * time.Minute)
+				_, err := diskService.RefreshDiskTemperatures(ctx)
+				return err
+			},
+		},
+		{
+			ID:                     scheduler.TaskBilibiliFavoritesSubscription,
+			Name:                   "Bilibili 收藏夹订阅检查",
+			Description:            "检查已订阅的 Bilibili 收藏夹并创建新的下载任务。",
+			DefaultEnabled:         true,
+			DefaultIntervalMinutes: 10,
+			Run: func(ctx context.Context, _ domain.ScheduledTask) error {
+				return favoritesService.RunOnce(ctx)
+			},
+		},
+	})
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := syncBilibiliFavoriteScheduledTask(appCtx, schedulerService, favoritesService); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	api := httpapi.NewAPI(baseDir, settingsService, manager, depsService, favoritesService, notificationService, tokens)
 	api.SetDiskProvider(diskService)
+	api.SetScheduler(schedulerService)
 	router := httpapi.NewRouter(api, webui.Assets)
 
 	current := settingsService.Current()
@@ -105,12 +150,42 @@ func New(baseDir string, logger *zap.Logger) (*App, error) {
 		password:  initialPassword,
 		manager:   manager,
 		favorites: favoritesService,
+		notifier:  notificationService,
+		scheduler: schedulerService,
 		disks:     diskService,
 		appCtx:    appCtx,
 		appCancel: appCancel,
 		status:    "未启动",
 		errCh:     make(chan error, 1),
 	}, nil
+}
+
+func syncBilibiliFavoriteScheduledTask(ctx context.Context, schedulerService *scheduler.Service, favoritesService *favorites.Service) error {
+	sub, err := favoritesService.Subscription()
+	if err != nil {
+		return err
+	}
+	interval := 10
+	tasks, err := schedulerService.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task.ID != scheduler.TaskBilibiliFavoritesSubscription {
+			continue
+		}
+		if task.IntervalMinutes > 0 {
+			interval = task.IntervalMinutes
+		} else if task.DefaultIntervalMinutes > 0 {
+			interval = task.DefaultIntervalMinutes
+		}
+		break
+	}
+	_, err = schedulerService.Update(ctx, scheduler.TaskBilibiliFavoritesSubscription, domain.ScheduledTaskUpdate{
+		Enabled:         sub.Enabled,
+		IntervalMinutes: interval,
+	})
+	return err
 }
 
 func (a *App) Start() error {
@@ -136,6 +211,9 @@ func (a *App) Start() error {
 	a.logger.Info("available urls", zap.Strings("urls", a.AccessURLs()))
 	if a.favorites != nil {
 		a.favorites.Start()
+	}
+	if a.scheduler != nil {
+		a.scheduler.Start()
 	}
 
 	go func() {
@@ -178,6 +256,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 
 		if a.favorites != nil {
 			a.favorites.Shutdown()
+		}
+		if a.scheduler != nil {
+			a.scheduler.Shutdown()
 		}
 		if a.manager != nil {
 			if err := a.manager.Shutdown(ctx); err != nil {
