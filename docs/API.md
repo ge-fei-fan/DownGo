@@ -111,6 +111,7 @@ Authorization: Bearer <token>
   "port": 12225,
   "downloadDir": "F:\\code2\\DownGo\\data\\downloads",
   "concurrentDownloads": 2,
+  "autoStartEnabled": false,
   "ytDlpPath": "F:\\code2\\DownGo\\data\\bin\\yt-dlp.exe",
   "ytDlpCookiePath": "",
   "ytDlpCookieEnabled": false,
@@ -275,6 +276,7 @@ PUT /api/settings
   "port": 12225,
   "downloadDir": "F:\\Downloads",
   "concurrentDownloads": 2,
+  "autoStartEnabled": true,
   "ytDlpPath": "F:\\code2\\DownGo\\data\\bin\\yt-dlp.exe",
   "ytDlpCookiePath": "F:\\cookies\\youtube.txt",
   "ytDlpCookieEnabled": true,
@@ -288,8 +290,9 @@ PUT /api/settings
 说明：
 
 - `accessPassword` 为空时不会修改访问密码。
+- `autoStartEnabled` 为 `true` 时，会为当前 Windows 用户写入开机自启；写入失败时设置保存失败。
 - `ytDlpCookieEnabled` 为 `true` 时，`ytDlpCookiePath` 必须指向存在的 `.txt` 文件；启用后 YouTube 解析和下载会带入 `--cookies` 参数。
-- 当前后端更新逻辑会处理 `bindHost`、`port`、`downloadDir`、`concurrentDownloads`、`ytDlpCookiePath`、`ytDlpCookieEnabled`、`accessPassword`。
+- 当前后端更新逻辑会处理 `bindHost`、`port`、`downloadDir`、`concurrentDownloads`、`autoStartEnabled`、`ytDlpCookiePath`、`ytDlpCookieEnabled`、`accessPassword`。
 
 ### 选择下载目录
 

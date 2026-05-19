@@ -188,7 +188,7 @@ onMounted(load)
     <section class="page-header">
       <div>
         <div class="header-kicker">Notifications</div>
-        <h1>通知</h1>
+        <h1>通知配置</h1>
       </div>
       <a-space>
         <a-button :loading="historyLoading" @click="loadHistory()">

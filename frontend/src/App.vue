@@ -85,7 +85,7 @@ onBeforeUnmount(() => {
           </a-menu-item>
           <a-menu-item key="notifications" @click="goTo('notifications')">
             <template #icon><BellOutlined /></template>
-            通知
+            通知配置
           </a-menu-item>
           <a-menu-item key="scheduled-tasks" @click="goTo('scheduled-tasks')">
             <template #icon><ClockCircleOutlined /></template>
@@ -127,7 +127,7 @@ onBeforeUnmount(() => {
         </a-menu-item>
         <a-menu-item key="notifications" @click="goTo('notifications')">
           <template #icon><BellOutlined /></template>
-          通知
+          通知配置
         </a-menu-item>
         <a-menu-item key="scheduled-tasks" @click="goTo('scheduled-tasks')">
           <template #icon><ClockCircleOutlined /></template>

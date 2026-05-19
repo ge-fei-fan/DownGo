@@ -50,6 +50,7 @@ const form = reactive<SettingsDTO>({
   port: 12225,
   downloadDir: '',
   concurrentDownloads: 2,
+  autoStartEnabled: false,
   ytDlpPath: '',
   ytDlpCookiePath: '',
   ytDlpCookieEnabled: false,
@@ -531,6 +532,12 @@ onBeforeUnmount(stopBilibiliPolling)
         <a-col :xs="24" :md="12">
           <a-form-item label="并发下载数">
             <a-input-number v-model:value="form.concurrentDownloads" style="width: 100%" :min="1" :max="16" />
+          </a-form-item>
+        </a-col>
+        <a-col :xs="24" :md="12">
+          <a-form-item label="开机自启">
+            <a-switch v-model:checked="form.autoStartEnabled" checked-children="启用" un-checked-children="关闭" />
+            <div class="field-hint">默认关闭；开启后会在当前 Windows 用户登录时自动启动 DownGo。</div>
           </a-form-item>
         </a-col>
       </a-row>

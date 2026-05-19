@@ -57,6 +57,7 @@ export type SettingsDTO = {
   port: number
   downloadDir: string
   concurrentDownloads: number
+  autoStartEnabled: boolean
   ytDlpPath: string
   ytDlpCookiePath: string
   ytDlpCookieEnabled: boolean

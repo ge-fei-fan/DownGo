@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"example.com/downgo/internal/autostart"
 	"example.com/downgo/internal/db"
 )
 
@@ -24,6 +25,7 @@ type Settings struct {
 	Port                 int    `json:"port"`
 	DownloadDir          string `json:"downloadDir"`
 	ConcurrentDownloads  int    `json:"concurrentDownloads"`
+	AutoStartEnabled     bool   `json:"autoStartEnabled"`
 	YtDlpPath            string `json:"ytDlpPath"`
 	YtDlpCookiePath      string `json:"ytDlpCookiePath"`
 	YtDlpCookieEnabled   bool   `json:"ytDlpCookieEnabled"`
@@ -73,6 +75,7 @@ type UpdateInput struct {
 	Port                int    `json:"port"`
 	DownloadDir         string `json:"downloadDir"`
 	ConcurrentDownloads int    `json:"concurrentDownloads"`
+	AutoStartEnabled    bool   `json:"autoStartEnabled"`
 	YtDlpPath           string `json:"ytDlpPath"`
 	YtDlpCookiePath     string `json:"ytDlpCookiePath"`
 	YtDlpCookieEnabled  bool   `json:"ytDlpCookieEnabled"`
@@ -85,6 +88,8 @@ type Service struct {
 	mu    sync.RWMutex
 	value Settings
 }
+
+var setAutoStartEnabled = autostart.SetEnabled
 
 func NewService(store *db.Store, defaults Settings) (*Service, error) {
 	s := &Service{store: store}
@@ -140,12 +145,16 @@ func (s *Service) Update(input UpdateInput, passwordHash func(string) string) (S
 	if input.ConcurrentDownloads > 0 {
 		next.ConcurrentDownloads = input.ConcurrentDownloads
 	}
+	next.AutoStartEnabled = input.AutoStartEnabled
 	next.YtDlpCookiePath = strings.TrimSpace(input.YtDlpCookiePath)
 	next.YtDlpCookieEnabled = input.YtDlpCookieEnabled
 	if input.AccessPassword != "" {
 		next.AccessTokenHash = passwordHash(input.AccessPassword)
 	}
 	if err := validateYtDlpCookie(next); err != nil {
+		return Settings{}, err
+	}
+	if err := setAutoStartEnabled(next.AutoStartEnabled); err != nil {
 		return Settings{}, err
 	}
 
@@ -302,6 +311,9 @@ func (s *Service) load(defaults Settings) error {
 			settings.ConcurrentDownloads = parsed
 		}
 	}
+	if value, ok := rows["auto_start_enabled"]; ok && value != "" {
+		settings.AutoStartEnabled = value == "true"
+	}
 	if value, ok := rows["yt_dlp_cookie_path"]; ok && value != "" {
 		settings.YtDlpCookiePath = value
 	}
@@ -390,6 +402,7 @@ func (s *Service) persist(settings Settings) error {
 		"port":                   strconv.Itoa(settings.Port),
 		"download_dir":           settings.DownloadDir,
 		"concurrent_downloads":   strconv.Itoa(settings.ConcurrentDownloads),
+		"auto_start_enabled":     strconv.FormatBool(settings.AutoStartEnabled),
 		"yt_dlp_cookie_path":     settings.YtDlpCookiePath,
 		"yt_dlp_cookie_enabled":  strconv.FormatBool(settings.YtDlpCookieEnabled),
 		"access_token_hash":      settings.AccessTokenHash,
