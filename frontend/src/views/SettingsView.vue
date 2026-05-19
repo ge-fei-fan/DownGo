@@ -495,56 +495,76 @@ onBeforeUnmount(stopBilibiliPolling)
     </div>
 
     <a-form layout="vertical">
-      <a-row :gutter="16">
-        <a-col :xs="24" :md="12">
-          <a-form-item label="监听地址">
-            <a-input v-model:value="form.bindHost" placeholder="0.0.0.0" />
-            <div class="field-hint">填 `0.0.0.0` 可允许局域网设备访问页面。</div>
-          </a-form-item>
-        </a-col>
-        <a-col :xs="24" :md="12">
-          <a-form-item label="端口">
-            <a-input-number v-model:value="form.port" style="width: 100%" :min="1" :max="65535" />
-          </a-form-item>
-        </a-col>
-      </a-row>
-
-      <a-form-item label="下载目录">
-        <a-input-group compact class="download-dir-control">
-          <a-input v-model:value="form.downloadDir" placeholder="选择或输入下载目录" />
-          <a-button :loading="selectingDir" @click="chooseDownloadDir">选择目录</a-button>
-        </a-input-group>
-      </a-form-item>
-
-      <a-form-item label="yt-dlp Cookie">
-        <div class="cookie-control">
-          <a-switch v-model:checked="form.ytDlpCookieEnabled" checked-children="启用" un-checked-children="关闭" />
-          <a-input-group compact class="cookie-path-control">
-            <a-input v-model:value="form.ytDlpCookiePath" placeholder="选择或输入 cookie txt 文件路径" />
-            <a-button :loading="selectingCookie" @click="chooseYtDlpCookie">选择文件</a-button>
-            <a-button @click="clearYtDlpCookie">清空</a-button>
-          </a-input-group>
+      <div class="settings-section">
+        <div class="settings-section-title">
+          <h2>系统配置</h2>
+          <div class="field-hint">控制页面访问、启动行为和登录密码。</div>
         </div>
-        <div class="field-hint">默认关闭；启用后，YouTube 解析和下载会通过 yt-dlp 使用该 cookies.txt 文件。</div>
-      </a-form-item>
 
-      <a-row :gutter="16">
-        <a-col :xs="24" :md="12">
-          <a-form-item label="并发下载数">
-            <a-input-number v-model:value="form.concurrentDownloads" style="width: 100%" :min="1" :max="16" />
-          </a-form-item>
-        </a-col>
-        <a-col :xs="24" :md="12">
-          <a-form-item label="开机自启">
-            <a-switch v-model:checked="form.autoStartEnabled" checked-children="启用" un-checked-children="关闭" />
-            <div class="field-hint">默认关闭；开启后会在当前 Windows 用户登录时自动启动 DownGo。</div>
-          </a-form-item>
-        </a-col>
-      </a-row>
+        <a-row :gutter="16">
+          <a-col :xs="24" :md="12">
+            <a-form-item label="监听地址">
+              <a-input v-model:value="form.bindHost" placeholder="0.0.0.0" />
+              <div class="field-hint">填 `0.0.0.0` 可允许局域网设备访问页面。</div>
+            </a-form-item>
+          </a-col>
+          <a-col :xs="24" :md="12">
+            <a-form-item label="端口">
+              <a-input-number v-model:value="form.port" style="width: 100%" :min="1" :max="65535" />
+            </a-form-item>
+          </a-col>
+        </a-row>
 
-      <a-form-item label="新的共享密码">
-        <a-input-password v-model:value="form.accessPassword" placeholder="留空则保持当前密码不变" />
-      </a-form-item>
+        <a-row :gutter="16">
+          <a-col :xs="24" :md="12">
+            <a-form-item label="开机自启">
+              <a-switch v-model:checked="form.autoStartEnabled" checked-children="启用" un-checked-children="关闭" />
+              <div class="field-hint">默认关闭；开启后会在当前 Windows 用户登录时自动启动 DownGo。</div>
+            </a-form-item>
+          </a-col>
+          <a-col :xs="24" :md="12">
+            <a-form-item label="新的共享密码">
+              <a-input-password v-model:value="form.accessPassword" placeholder="留空则保持当前密码不变" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+      </div>
+
+      <a-divider />
+
+      <div class="settings-section">
+        <div class="settings-section-title">
+          <h2>视频配置</h2>
+          <div class="field-hint">控制下载保存位置、下载并发和视频解析 Cookie。</div>
+        </div>
+
+        <a-form-item label="下载目录">
+          <a-input-group compact class="download-dir-control">
+            <a-input v-model:value="form.downloadDir" placeholder="选择或输入下载目录" />
+            <a-button :loading="selectingDir" @click="chooseDownloadDir">选择目录</a-button>
+          </a-input-group>
+        </a-form-item>
+
+        <a-form-item label="yt-dlp Cookie">
+          <div class="cookie-control">
+            <a-switch v-model:checked="form.ytDlpCookieEnabled" checked-children="启用" un-checked-children="关闭" />
+            <a-input-group compact class="cookie-path-control">
+              <a-input v-model:value="form.ytDlpCookiePath" placeholder="选择或输入 cookie txt 文件路径" />
+              <a-button :loading="selectingCookie" @click="chooseYtDlpCookie">选择文件</a-button>
+              <a-button @click="clearYtDlpCookie">清空</a-button>
+            </a-input-group>
+          </div>
+          <div class="field-hint">默认关闭；启用后，YouTube 解析和下载会通过 yt-dlp 使用该 cookies.txt 文件。</div>
+        </a-form-item>
+
+        <a-row :gutter="16">
+          <a-col :xs="24" :md="12">
+            <a-form-item label="并发下载数">
+              <a-input-number v-model:value="form.concurrentDownloads" style="width: 100%" :min="1" :max="16" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+      </div>
     </a-form>
 
     <a-divider />
@@ -700,6 +720,22 @@ onBeforeUnmount(stopBilibiliPolling)
 
 h1 {
   margin: 10px 0 0;
+}
+
+.settings-section {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.settings-section-title h2 {
+  margin: 0 0 6px;
 }
 
 .deps-section {
@@ -872,6 +908,10 @@ h1 {
 
   .deps-header {
     flex-direction: column;
+  }
+
+  .settings-section-title {
+    display: block;
   }
 
   .deps-header :deep(.ant-space) {
